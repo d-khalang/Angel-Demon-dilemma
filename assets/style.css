@@ -1,0 +1,31 @@
+.stApp {
+  background:
+    linear-gradient(90deg, rgba(255, 244, 210, 0.55), rgba(255, 255, 255, 0) 38%),
+    linear-gradient(270deg, rgba(91, 19, 31, 0.10), rgba(255, 255, 255, 0) 42%),
+    #fbfaf7;
+}
+
+[data-testid="stSidebar"] {
+  background: #f4f0e8;
+}
+
+h1, h2, h3 {
+  letter-spacing: 0;
+}
+
+.stButton > button {
+  border-radius: 6px;
+  min-height: 2.6rem;
+  font-weight: 650;
+}
+
+[data-testid="stMetric"] {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(40, 35, 30, 0.12);
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+[data-testid="stTextArea"] textarea {
+  border-radius: 8px;
+}
