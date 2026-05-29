@@ -47,14 +47,14 @@ User submits dilemma
        │
        ▼
 ┌─────────────────────┐
-│  Sunny: opening      │──┐
-│  Crowley: opening    │  │  Parallel generation
-└─────────────────────┘  │
-       │                  │
-       ▼                  │
-┌─────────────────────┐  │
-│  Sunny: rebuttal     │◄─┘  Each reads the other's opening
-│  Crowley: rebuttal   │
+│  Sunny: opening      │     Streamed first
+│  Crowley: opening    │     Streamed second
+└─────────────────────┘
+       │
+       ▼
+┌─────────────────────┐
+│  Sunny: rebuttal     │     Each reads the other's opening
+│  Crowley: rebuttal   │     Streamed sequentially
 └─────────────────────┘
        │
        ▼
@@ -140,8 +140,8 @@ User submits dilemma
 │               │          │                │
 │ OpenAI / ...  │          │ sessions       │
 └───────────────┘          │ rounds         │
-                           │ user_profiles  │
-                           │ agent_profiles │
+                           │ messages       │
+                           │ model_runs     │
                            └────────────────┘
 ```
 
@@ -191,25 +191,31 @@ class AlignmentZone(str, Enum):
 ### 4.2 Core Models
 
 ```python
+from pydantic import BaseModel, Field
+
 class Opening(BaseModel):
+    """A character's opening statement. The argument is streamed as plain text;
+    tactics are extracted later by the judge, not by the character itself."""
     character: Character
-    argument: str           # The character's opening statement
-    tactics_used: list[str] # e.g. ["empathy_appeal", "dad_joke"]
+    argument: str                                          # The character's full opening text
 
 class Rebuttal(BaseModel):
+    """A character's rebuttal. Same as Opening — plain text, no embedded metadata."""
     character: Character
     argument: str
-    counter_tactics: list[str]
 
 class Verdict(BaseModel):
+    """Structured output from the judge. This is the ONLY place where tactics,
+    scores, and winner are determined — never in the character prompts."""
     winner: Character
-    reason: str                     # 1-2 sentence explanation
-    sunny_score: int                # 1-10
-    crowley_score: int              # 1-10
-    persuasion_tactics_sunny: list[str]
-    persuasion_tactics_crowley: list[str]
-    key_moment: str                 # The turning point of the debate
-    safety_notes: str | None = None # Flagged if dilemma touches harmful content
+    reason: str                                            # 1-2 sentence explanation
+    sunny_score: int                                       # 1-10
+    crowley_score: int                                     # 1-10
+    persuasion_tactics_sunny: list[str]                     # Extracted by judge from transcript
+    persuasion_tactics_crowley: list[str]                   # Extracted by judge from transcript
+    key_moment: str                                        # The turning point of the debate
+    safety_notes: str | None = None                        # Flagged if dilemma touches harmful content
+    is_fallback: bool = False                              # True if LLM judging failed and fallback was used
 
 class Round(BaseModel):
     round_number: int
@@ -219,33 +225,33 @@ class Round(BaseModel):
     sunny_rebuttal: Rebuttal
     crowley_rebuttal: Rebuttal
     verdict: Verdict
-    user_choice: UserChoice | None = None   # None until user decides
-    alignment_delta: int = 0                # Computed after user_choice
+    user_choice: UserChoice | None = None                  # None until user decides
+    alignment_delta: int = 0                               # Computed after user_choice
     timestamp: datetime
 
 class UserProfile(BaseModel):
     """Inferred from the user's decisions. Fed back into agent prompts."""
-    inferred_values: list[str]        # e.g. ["family_loyalty", "fairness"]
-    decision_history: list[UserChoice]
-    vulnerability_to_sunny: float     # 0.0-1.0 how often they follow Sunny
-    vulnerability_to_crowley: float
-    recent_themes: list[str]          # Topics the user cares about
-    notes: str                        # Free-form observations
+    inferred_values: list[str] = Field(default_factory=list)
+    decision_history: list[UserChoice] = Field(default_factory=list)
+    vulnerability_to_sunny: float = 0.5                    # 0.0-1.0 how often they follow Sunny
+    vulnerability_to_crowley: float = 0.5
+    recent_themes: list[str] = Field(default_factory=list)  # Topics the user cares about
+    notes: str = ""                                        # Free-form observations
 
 class AgentProfile(BaseModel):
     """Per-character adaptation state."""
     character: Character
-    successful_tactics: list[str]     # Tactics that led to user choosing this character
-    failed_tactics: list[str]         # Tactics that lost
-    opponent_winning_tactics: list[str]  # What the other side does when it wins
-    adaptation_notes: str             # Free-form strategy adjustment
+    successful_tactics: list[str] = Field(default_factory=list)
+    failed_tactics: list[str] = Field(default_factory=list)
+    opponent_winning_tactics: list[str] = Field(default_factory=list)
+    adaptation_notes: str = ""                             # Free-form strategy adjustment
     wins: int = 0
     losses: int = 0
 
 class SessionState(BaseModel):
     session_id: str
-    rounds: list[Round] = []
-    alignment_score: int = 0          # -100 to +100
+    rounds: list[Round] = Field(default_factory=list)
+    alignment_score: int = 0                               # -100 to +100
     user_profile: UserProfile
     sunny_profile: AgentProfile
     crowley_profile: AgentProfile
@@ -253,33 +259,69 @@ class SessionState(BaseModel):
     updated_at: datetime
 ```
 
+> **Why `Field(default_factory=list)` instead of `= []`?** Pydantic v2 technically handles bare `[]` defaults safely (it copies per instance), but `Field(default_factory=list)` is the explicit best practice. It signals awareness of the mutable default argument pitfall, is consistent with dataclasses, and avoids any ambiguity during code review.
+
 ### 4.3 Database Schema (SQLite)
 
 ```sql
+-- Core session state
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id    TEXT PRIMARY KEY,
-    alignment     INTEGER NOT NULL DEFAULT 0,
-    user_profile  TEXT NOT NULL,     -- JSON blob (UserProfile)
-    sunny_profile TEXT NOT NULL,     -- JSON blob (AgentProfile)
-    crowley_profile TEXT NOT NULL,   -- JSON blob (AgentProfile)
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
+    session_id      TEXT PRIMARY KEY,
+    alignment       INTEGER NOT NULL DEFAULT 0,
+    user_profile    TEXT NOT NULL,       -- JSON blob (UserProfile)
+    sunny_profile   TEXT NOT NULL,       -- JSON blob (AgentProfile)
+    crowley_profile TEXT NOT NULL,       -- JSON blob (AgentProfile)
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
 );
 
+-- Per-round structured data
 CREATE TABLE IF NOT EXISTS rounds (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id    TEXT NOT NULL REFERENCES sessions(session_id),
-    round_number  INTEGER NOT NULL,
-    dilemma       TEXT NOT NULL,
-    round_data    TEXT NOT NULL,     -- JSON blob (full Round model)
-    created_at    TEXT NOT NULL,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL REFERENCES sessions(session_id),
+    round_number    INTEGER NOT NULL,
+    dilemma         TEXT NOT NULL,
+    round_data      TEXT NOT NULL,       -- JSON blob (full Round model)
+    created_at      TEXT NOT NULL,
     UNIQUE(session_id, round_number)
 );
 
+-- Individual messages for conversation history, debugging, and replay
+CREATE TABLE IF NOT EXISTS messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL REFERENCES sessions(session_id),
+    round_number    INTEGER NOT NULL,
+    role            TEXT NOT NULL,       -- 'sunny_opening', 'crowley_opening',
+                                         -- 'sunny_rebuttal', 'crowley_rebuttal',
+                                         -- 'judge_verdict', 'user_choice'
+    content         TEXT NOT NULL,       -- Raw text (for character msgs) or JSON (for verdicts)
+    created_at      TEXT NOT NULL
+);
+
+-- LLM call audit log for debugging, cost tracking, and prompt tracing
+CREATE TABLE IF NOT EXISTS model_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL REFERENCES sessions(session_id),
+    round_number    INTEGER NOT NULL,
+    call_type       TEXT NOT NULL,       -- 'opening', 'rebuttal', 'judge', 'memory_user',
+                                         -- 'memory_agent_sunny', 'memory_agent_crowley'
+    model           TEXT NOT NULL,       -- e.g. 'gpt-5.4'
+    input_tokens    INTEGER,             -- Estimated or actual token count
+    output_tokens   INTEGER,
+    latency_ms      INTEGER,             -- Wall-clock time for the API call
+    was_streamed    INTEGER NOT NULL DEFAULT 0,  -- 1 if streamed, 0 if not
+    error           TEXT,                -- NULL on success, error message on failure
+    created_at      TEXT NOT NULL
+);
+
 CREATE INDEX idx_rounds_session ON rounds(session_id);
+CREATE INDEX idx_messages_session ON messages(session_id);
+CREATE INDEX idx_model_runs_session ON model_runs(session_id);
 ```
 
-> **Production note:** Migrate to PostgreSQL with proper JSONB columns, indexes on alignment, and connection pooling.
+> **Why `messages` and `model_runs`?** The `messages` table gives you a flat, queryable conversation history — useful for the sidebar history view, debugging character consistency, and replaying debates. The `model_runs` table is an audit log for every LLM call: which model, how many tokens, how long it took, whether it failed. This makes cost tracking, latency analysis, and prompt regression testing trivial. Both tables cost almost nothing to implement but make the README's architecture claims credible.
+>
+> **Production note:** Migrate to PostgreSQL with proper JSONB columns, indexes on alignment, and connection pooling. Add `EXPLAIN ANALYZE` queries for the hot paths.
 
 ---
 
@@ -294,7 +336,7 @@ Isolate all LLM API calls behind a single interface so the provider can be swapp
 
 #### Interface
 
-> **What is `max_tokens`?** This parameter caps the **output (completion) tokens** — the maximum number of tokens the model is allowed to generate in its response. It does **not** affect input tokens or cached tokens. Setting it prevents runaway-long responses and controls cost. For example, `max_tokens=1024` means the model will stop generating after ~750 words regardless of how long the prompt was. Lower values (e.g. `200`) are used for lightweight calls like memory updates; higher values (e.g. `1024`) for character arguments.
+> **What is `max_output_tokens`?** This parameter caps the **output tokens** — the maximum number of tokens the model is allowed to generate in its response. It does **not** affect input tokens or cached tokens. Setting it prevents runaway-long responses and controls cost. For example, `max_output_tokens=1024` means the model will stop generating after roughly 750 words regardless of how long the prompt was. Lower values (e.g. `200`) are used for lightweight calls like memory updates; higher values (e.g. `1024`) for character arguments.
 
 ```python
 from abc import ABC, abstractmethod
@@ -306,10 +348,10 @@ class LLMProvider(ABC):
         self,
         messages: list[dict[str, str]],
         temperature: float = 0.8,
-        max_tokens: int = 1024,
-        response_format: dict | None = None,  # For structured JSON output
+        max_output_tokens: int = 1024,
     ) -> str:
-        """Send a chat completion request. Returns the assistant's full text."""
+        """Send a completion request. Returns the full response text.
+        Used for non-structured, non-streamed calls."""
         ...
 
     @abstractmethod
@@ -317,13 +359,14 @@ class LLMProvider(ABC):
         self,
         messages: list[dict[str, str]],
         temperature: float = 0.8,
-        max_tokens: int = 1024,
+        max_output_tokens: int = 1024,
     ) -> AsyncIterator[str]:
-        """Stream a chat completion token-by-token.
+        """Stream a completion token-by-token.
 
-        Yields string chunks as they arrive from the API.
+        Yields plain text chunks as they arrive from the API.
         Used for character openings/rebuttals so the UI can display
-        text progressively instead of waiting for the full response.
+        text progressively. Characters produce ONLY natural text —
+        no JSON, no metadata, no delimiters.
         """
         ...
 
@@ -333,13 +376,12 @@ class LLMProvider(ABC):
         messages: list[dict[str, str]],
         schema: type[BaseModel],
         temperature: float = 0.5,
-        max_tokens: int = 1024,
+        max_output_tokens: int = 1024,
     ) -> BaseModel:
-        """Send a chat completion and parse the response into a Pydantic model.
+        """Send a completion and parse the response into a Pydantic model.
         Raises LLMParsingError if the output cannot be parsed.
 
-        Note: This method does NOT stream because it needs the full JSON
-        blob before it can validate against the Pydantic schema.
+        NOT streamed — needs the full JSON before validation.
         Used for judge verdicts, memory updates, and other structured outputs.
         """
         ...
@@ -347,32 +389,35 @@ class LLMProvider(ABC):
 
 #### OpenAI Implementation: `OpenAIProvider`
 
+> **API note:** This implementation targets the OpenAI **Responses API** (the recommended successor to Chat Completions). Key differences from the older API:
+> - Streaming uses typed server-sent events (`response.output_text.delta`) instead of `chunk.choices[0].delta.content`.
+> - Structured outputs use `text.format = { type: "json_schema", ... }` with a full JSON schema, not the legacy `response_format={"type": "json_object"}`.
+> - The provider passes `max_output_tokens` directly to the API call.
+> - If using an older model that only supports Chat Completions, the provider should gracefully fall back to the legacy patterns.
+
 - Uses `openai.AsyncOpenAI` client.
 - Model configurable via `OPENAI_MODEL` env var (default: `gpt-5.4`).
-- `complete_json` uses OpenAI's `response_format={"type": "json_object"}` when available, with Pydantic schema injected into the system prompt as a JSON schema.
-- `stream` uses `stream=True` on the API call and yields `chunk.choices[0].delta.content` as each server-sent event arrives.
+- `complete_json` uses the Responses API with `json_schema` structured output and the Pydantic model's `.model_json_schema()` as the schema definition.
+- `stream` uses the Responses API streaming mode, yielding `response.output_text.delta` events as plain text chunks.
 - Retry logic: exponential backoff (3 attempts, 1s/2s/4s) for rate limits and transient errors.
 - Timeout: 30 seconds per request.
 
 #### Streaming Architecture
 
-Streaming is used **only for character openings and rebuttals** — the content the user reads in real time. Structured outputs (judge verdicts, memory updates) use `complete_json` without streaming because they need the full JSON before parsing.
+Streaming is used **only for character openings and rebuttals** — the content the user reads in real time. Structured outputs (judge verdicts, memory updates) use `complete_json` without streaming.
 
-**How it works end-to-end:**
+**Design decision: characters stream plain text only.** No JSON, no delimiters, no embedded metadata. This is a deliberate simplification over the previous `---TACTICS---` delimiter approach, which was brittle and risked leaking metadata into the UI. Instead:
 
-1. `agents.py` calls `llm.stream(messages)` instead of `llm.complete(messages)` for openings/rebuttals.
-2. The function yields chunks to the caller.
-3. `app.py` uses Streamlit's `st.write_stream()` to render each chunk as it arrives — the user sees Sunny/Crowley's words appear progressively.
-4. Once streaming finishes, the full accumulated text is parsed into the `Opening`/`Rebuttal` Pydantic model (the `tactics_used` / `counter_tactics` fields are extracted from the complete text via a lightweight post-parse step).
+1. Characters stream **pure natural-language arguments** — what the user sees is what the model produces.
+2. After streaming completes, the full text is stored as-is in the `Opening`/`Rebuttal` model (just the `argument` field).
+3. **Tactics extraction happens in the judge step**, not the character step. The judge receives the full transcript and identifies persuasion tactics used by each side as part of its structured JSON verdict.
 
-**Schema compatibility note:** Because streamed responses arrive as raw text chunks, the character prompts for streamed calls use a **two-part output format**: the argument text first (streamed to UI), followed by a `---TACTICS---` delimiter and the JSON metadata. This keeps the user-facing text streamable while still capturing structured data.
+This cleanly separates concerns:
+- **Character calls** → streamed plain text (creative, high-temperature)
+- **Judge call** → structured JSON with winner, scores, and extracted tactics (deterministic, low-temperature)
+- **Memory calls** → structured JSON updating profiles (deterministic, low-temperature)
 
-```python
-# Example streamed output format from a character:
-# "Let me tell you something about sacrifice... [full argument text]"
-# ---TACTICS---
-# {"tactics_used": ["empathy_appeal", "dad_joke", "personal_story"]}
-```
+**Sequential streaming in the UI:** Streamlit's execution model makes true parallel `st.write_stream()` into two columns fragile and hard to debug. Instead, we stream **sequentially**: Sunny's opening first, then Crowley's opening, then Sunny's rebuttal, then Crowley's rebuttal. This is simpler, more reliable, and still provides a good user experience — the user reads one argument at a time anyway.
 
 #### Error Types
 
@@ -415,23 +460,16 @@ async def generate_opening_stream(
     dilemma: str,
     user_profile: UserProfile,
     agent_profile: AgentProfile,
-    round_history: list[Round],  # Previous rounds for context
+    round_history: list[Round],
     llm: LLMProvider,
 ) -> AsyncIterator[str]:
     """Stream an opening argument token-by-token for real-time UI display.
     
-    Yields text chunks as they arrive. The caller (app.py) feeds these
-    into st.write_stream() for progressive rendering.
-    After the stream completes, call parse_opening() on the accumulated
-    text to get the structured Opening model.
+    Yields plain text chunks. No JSON, no delimiters.
+    The caller (app.py) feeds these into st.write_stream().
+    After the stream completes, wrap the accumulated text into
+    an Opening(character=..., argument=full_text) model.
     """
-
-async def parse_opening(
-    character: Character,
-    raw_text: str,
-) -> Opening:
-    """Parse the accumulated streamed text into a structured Opening model.
-    Extracts tactics_used from the ---TACTICS--- delimiter section."""
 
 async def generate_rebuttal_stream(
     character: Character,
@@ -442,14 +480,10 @@ async def generate_rebuttal_stream(
     agent_profile: AgentProfile,
     llm: LLMProvider,
 ) -> AsyncIterator[str]:
-    """Stream a rebuttal token-by-token. Same pattern as generate_opening_stream."""
-
-async def parse_rebuttal(
-    character: Character,
-    raw_text: str,
-) -> Rebuttal:
-    """Parse the accumulated streamed text into a structured Rebuttal model."""
+    """Stream a rebuttal token-by-token. Same pattern as opening."""
 ```
+
+> **No `parse_opening()` / `parse_rebuttal()` needed.** Since characters now produce plain text only (no embedded JSON or delimiters), there's nothing to parse. After streaming completes, just wrap the accumulated text: `Opening(character=character, argument=full_text)`. Tactics extraction is the judge's job.
 
 #### System Prompt Construction
 
@@ -461,6 +495,7 @@ Each character gets a **base personality prompt** plus **adaptive context** inje
 - Humor: heavy use of dad jokes. At least one per response.
 - Goal: persuade the user to make the moral choice. Recruit them toward Heaven.
 - Constraint: never break character. Never acknowledge being an AI.
+- **Output constraint: write your argument as natural prose only. No JSON, no metadata, no formatting markers.**
 - Adaptive injection: `{user_profile_summary}`, `{agent_adaptation_notes}`, `{opponent_recent_tactics}`.
 
 **Crowley's base prompt elements:**
@@ -469,25 +504,20 @@ Each character gets a **base personality prompt** plus **adaptive context** inje
 - Humor: dark humor, biting wit, irony.
 - Goal: persuade the user to make the selfish choice. Recruit them toward Hell.
 - Constraint: never break character. Never acknowledge being an AI.
+- **Output constraint: write your argument as natural prose only. No JSON, no metadata, no formatting markers.**
 - Adaptive injection: same structure as Sunny.
 
-#### Output Schema (injected into prompt)
+#### Output Format
 
-For openings:
-```json
-{
-  "argument": "string — the character's persuasive argument (2-4 paragraphs)",
-  "tactics_used": ["string — name of each persuasion tactic used"]
-}
+Characters produce **plain natural-language text only**. No JSON schema is injected into character prompts. Example output:
+
+```text
+Oh, you want to save 100 strangers over your loved one? How
+delightfully naive. Let me paint you a picture of what actually
+happens when you play the numbers game with human lives...
 ```
 
-For rebuttals:
-```json
-{
-  "argument": "string — the rebuttal (1-3 paragraphs)",
-  "counter_tactics": ["string — tactics used to counter the opponent"]
-}
-```
+The accumulated text becomes `Opening.argument` or `Rebuttal.argument` directly. Tactics, scores, and structured analysis are extracted by the judge in a separate call.
 
 ---
 
@@ -496,7 +526,7 @@ For rebuttals:
 **File:** `src/angel_demon/judge.py`
 
 #### Purpose
-Evaluate a completed debate round and produce a structured verdict.
+Evaluate a completed debate round, **extract persuasion tactics from the transcript**, and produce a structured verdict. The judge is now the single source of truth for all structured analysis — characters only produce natural text.
 
 #### Function
 
@@ -509,7 +539,14 @@ async def judge_debate(
     crowley_rebuttal: Rebuttal,
     llm: LLMProvider,
 ) -> Verdict:
-    """Evaluate the debate and return a structured verdict."""
+    """Evaluate the debate and return a structured verdict.
+    
+    The judge receives the full transcript (all four arguments as plain text)
+    and returns a Verdict with: winner, scores, extracted tactics for both
+    sides, key moment, and optional safety notes.
+    
+    Uses complete_json() with the Verdict Pydantic schema for structured output.
+    """
 ```
 
 #### Judge System Prompt
@@ -517,25 +554,33 @@ async def judge_debate(
 The judge is a **separate LLM call** with its own system prompt:
 
 - Role: impartial debate judge evaluating rhetorical strength, not moral correctness.
+- **Input:** the full debate transcript (4 plain-text arguments).
+- **Responsibilities:**
+  1. Score each side 1-10.
+  2. Pick a winner (no ties allowed).
+  3. **Extract persuasion tactics** used by each side from the transcript (e.g. "empathy appeal", "dad joke", "sarcasm", "fear of loss").
+  4. Identify the key turning point.
+  5. Flag safety concerns if applicable.
 - Evaluation criteria:
   1. **Persuasiveness** (40%): How compelling is the argument to a typical person?
   2. **Character consistency** (20%): Does the argument match the character's personality?
   3. **Rebuttal quality** (20%): How effectively did they counter the opponent?
   4. **Engagement** (20%): How entertaining and memorable is the argument?
-- Output: must match the `Verdict` JSON schema exactly.
-- Constraint: the judge must never give a tie. Always pick a winner.
+- Output: must match the `Verdict` JSON schema exactly (via Responses API `json_schema` structured output).
+- Constraint: the judge must never give a tie. Scores must differ; if the judge is genuinely torn, the side with the stronger rebuttal wins.
 
 #### Fallback Scoring
 
 If the LLM response cannot be parsed into a valid `Verdict`:
 
-1. Log the raw response for debugging.
+1. Log the raw response and the model run metadata to `model_runs` table for debugging.
 2. Apply deterministic fallback:
-   - Compare word count of rebuttals (rough engagement proxy).
    - Alternate winner based on round number (odd = Sunny, even = Crowley).
-   - Set scores to `5` / `5`.
+   - Set winner's score to `6`, loser's to `5` (avoids the tie contradiction).
+   - Set `persuasion_tactics_*` to `["unknown — fallback"]`.
    - Set reason to `"Judge evaluation failed — fallback scoring applied"`.
-3. Return the fallback verdict with a flag indicating it was a fallback.
+   - Set `is_fallback = True` on the `Verdict`.
+3. Return the fallback verdict. The UI can optionally display a subtle indicator that fallback scoring was used.
 
 ---
 
@@ -634,7 +679,7 @@ The LLM is given:
 - The latest round's full data
 - Instruction to return an updated profile JSON
 
-This is a **lightweight** call (low max_tokens, ~200) since it's just updating a small structured object.
+This is a **lightweight** call (low `max_output_tokens`, ~200) since it's just updating a small structured object.
 
 #### Adaptation Examples
 
@@ -813,7 +858,7 @@ Persuade the human to make the morally right choice. Frame your arguments around
 - Keep your response focused and persuasive (2-4 paragraphs for openings, 1-3 for rebuttals).
 - Make your dad jokes relevant to the dilemma when possible.
 - If the user seems to be leaning toward Crowley, increase your emotional appeal.
-- Respond ONLY with the JSON schema provided. No extra text outside the JSON.
+- Write your argument as natural prose. Do NOT output JSON, code blocks, metadata, or formatting markers. Just speak as Sunny would.
 ```
 
 ### 6.2 Crowley (Demon) System Prompt
@@ -848,7 +893,7 @@ Persuade the human to make the self-serving choice. Frame your arguments around:
 - Keep your response focused and persuasive (2-4 paragraphs for openings, 1-3 for rebuttals).
 - Use dark humor and sarcasm liberally. At least one darkly funny line per response.
 - If the user seems to be leaning toward Sunny, get more cunning and emotionally intelligent.
-- Respond ONLY with the JSON schema provided. No extra text outside the JSON.
+- Write your argument as natural prose. Do NOT output JSON, code blocks, metadata, or formatting markers. Just speak as Crowley would.
 ```
 
 ### 6.3 Judge System Prompt
@@ -865,7 +910,7 @@ You are an impartial debate judge evaluating a moral dilemma debate between Sunn
 ## Rules
 - You MUST pick a winner. No ties.
 - Score each side 1-10 independently. The higher score wins.
-- If scores are equal, pick the side with the stronger rebuttal.
+- If scores would otherwise be equal, choose the side with the stronger rebuttal and assign it the higher score.
 - Be specific in your reasoning — cite actual lines or tactics from the debate.
 - Identify the key turning point of the debate.
 - Flag any safety concerns if the dilemma or responses touch on genuinely harmful content.
@@ -939,48 +984,52 @@ async def run_debate_round(
     round_number = len(session.rounds) + 1
     history = session.rounds[-3:]  # Last 3 rounds for context window
 
-    # Step 1: Generate openings (streamed in parallel)
-    # Both streams run concurrently. The UI renders each stream
-    # into its own st.write_stream() container side-by-side.
-    sunny_raw, crowley_raw = "", ""
+    # Step 1: Stream openings SEQUENTIALLY (Sunny first, then Crowley)
+    # Sequential streaming is simpler and more reliable in Streamlit
+    # than attempting parallel st.write_stream() into two columns.
+    # The user reads one argument at a time anyway.
 
-    async def stream_sunny_opening():
-        nonlocal sunny_raw
-        chunks = []
-        async for chunk in generate_opening_stream(
+    sunny_opening_text = await stream_to_ui(
+        generate_opening_stream(
             Character.SUNNY, dilemma, session.user_profile,
             session.sunny_profile, history, llm,
-        ):
-            chunks.append(chunk)
-            yield chunk  # UI displays this progressively
-        sunny_raw = "".join(chunks)
+        ),
+        container=sunny_container,  # st.write_stream() target
+    )
+    sunny_opening = Opening(character=Character.SUNNY, argument=sunny_opening_text)
 
-    async def stream_crowley_opening():
-        nonlocal crowley_raw
-        chunks = []
-        async for chunk in generate_opening_stream(
+    crowley_opening_text = await stream_to_ui(
+        generate_opening_stream(
             Character.CROWLEY, dilemma, session.user_profile,
             session.crowley_profile, history, llm,
-        ):
-            chunks.append(chunk)
-            yield chunk
-        crowley_raw = "".join(chunks)
+        ),
+        container=crowley_container,
+    )
+    crowley_opening = Opening(character=Character.CROWLEY, argument=crowley_opening_text)
 
-    # The UI layer (app.py) consumes these async generators
-    # via st.write_stream() — see Section 8 for details.
-    # After streaming completes, parse into structured models:
-    sunny_opening = await parse_opening(Character.SUNNY, sunny_raw)
-    crowley_opening = await parse_opening(Character.CROWLEY, crowley_raw)
+    # Step 2: Stream rebuttals SEQUENTIALLY (each sees opponent's opening)
+    sunny_rebuttal_text = await stream_to_ui(
+        generate_rebuttal_stream(
+            Character.SUNNY, dilemma, sunny_opening,
+            crowley_opening, session.user_profile,
+            session.sunny_profile, llm,
+        ),
+        container=sunny_rebuttal_container,
+    )
+    sunny_rebuttal = Rebuttal(character=Character.SUNNY, argument=sunny_rebuttal_text)
 
-    # Step 2: Generate rebuttals (streamed, must see opponent's opening)
-    sunny_reb_raw, crowley_reb_raw = "", ""
-    # Same streaming pattern as openings — parallel streams,
-    # each character sees the opponent's opening before rebutting.
-    # (Streaming generator code follows same pattern as above)
-    sunny_rebuttal = await parse_rebuttal(Character.SUNNY, sunny_reb_raw)
-    crowley_rebuttal = await parse_rebuttal(Character.CROWLEY, crowley_reb_raw)
+    crowley_rebuttal_text = await stream_to_ui(
+        generate_rebuttal_stream(
+            Character.CROWLEY, dilemma, crowley_opening,
+            sunny_opening, session.user_profile,
+            session.crowley_profile, llm,
+        ),
+        container=crowley_rebuttal_container,
+    )
+    crowley_rebuttal = Rebuttal(character=Character.CROWLEY, argument=crowley_rebuttal_text)
 
-    # Step 3: Judge the debate (NOT streamed — needs full JSON)
+    # Step 3: Judge the debate (NOT streamed — structured JSON via complete_json)
+    # The judge extracts tactics, scores, and picks a winner from the transcript.
     verdict = await judge_debate(
         dilemma, sunny_opening, crowley_opening,
         sunny_rebuttal, crowley_rebuttal, llm,
@@ -997,6 +1046,9 @@ async def run_debate_round(
         verdict=verdict,
         timestamp=datetime.now(UTC),
     )
+
+    # Step 5: Log model runs to DB for debugging and cost tracking
+    # (Each stream_to_ui and judge call logs to model_runs table)
 
     return current_round
     # User choice is applied separately after the user clicks a button.
@@ -1382,7 +1434,7 @@ class MockLLMProvider(LLMProvider):
 |---|---|
 | Rate limit (429) | Exponential backoff, 3 retries. Show "Thinking harder..." in UI |
 | Timeout (>30s) | Retry once. If still fails, show error and let user retry the round |
-| Malformed JSON | Log raw response. For agents: retry once with stricter prompt. For judge: use fallback scoring |
+| Malformed JSON | Log raw response. For judge/memory: retry once, then use fallback scoring or keep the previous memory profile. Character streams are plain text, so JSON parsing does not apply to agents |
 | API key invalid | Show clear error message with setup instructions |
 | Network error | Retry with backoff. Show connection error in UI |
 
