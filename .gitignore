@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# App runtime state
+data/
+*.db
+*.db-journal
+
+# Private assignment/source material and local planning notes
+docs/input/
+docs/assignment.md
+docs/implementation-plan.md
+
+# One-off local API diagnostics
+scripts/smoke_openai_response.py
