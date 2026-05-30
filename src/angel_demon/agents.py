@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from angel_demon.llm import LLMProvider
+from angel_demon.llm import LLMProvider, LLMStreamChunk
 from angel_demon.models import AgentProfile, Character, Opening, Rebuttal, Round, UserProfile
 from angel_demon.prompts import character_instructions, opening_input, rebuttal_input
 
@@ -86,6 +86,8 @@ async def generate_opening_stream(
         round_history,
     )
     async for chunk in llm.stream(messages, temperature, max_output_tokens):
+        if isinstance(chunk, LLMStreamChunk):
+            continue
         yield chunk
 
 
@@ -112,6 +114,8 @@ async def generate_rebuttal_stream(
         opponent_profile,
     )
     async for chunk in llm.stream(messages, temperature, max_output_tokens):
+        if isinstance(chunk, LLMStreamChunk):
+            continue
         yield chunk
 
 

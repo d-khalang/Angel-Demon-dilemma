@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from angel_demon.llm import LLMError, LLMProvider
+from angel_demon.llm import LLMError, LLMProvider, attach_usage, get_attached_usage
+from angel_demon.logging_config import get_logger
 from angel_demon.models import (
     AgentProfile,
     AgentProfileUpdate,
@@ -13,6 +14,8 @@ from angel_demon.models import (
     UserProfileUpdate,
 )
 from angel_demon.prompts import AGENT_MEMORY_INSTRUCTIONS, USER_MEMORY_INSTRUCTIONS
+
+logger = get_logger("memory")
 
 
 def _dedupe(values: list[str], limit: int = 8) -> list[str]:
@@ -52,9 +55,13 @@ async def update_user_profile(
             max_output_tokens=500,
         )
     except LLMError:
+        logger.exception(
+            "user_profile_update_failed_using_heuristic round_number=%d",
+            round_result.round_number,
+        )
         update = _heuristic_user_update(profile, round_result)
 
-    return UserProfile(
+    updated = UserProfile(
         inferred_values=_dedupe(update.inferred_values),
         decision_history=[
             *profile.decision_history,
@@ -65,6 +72,14 @@ async def update_user_profile(
         recent_themes=_dedupe(update.recent_themes, limit=5),
         notes=update.notes,
     )
+    updated = attach_usage(updated, get_attached_usage(update))
+    logger.info(
+        "user_profile_updated round_number=%d values=%d recent_themes=%d",
+        round_result.round_number,
+        len(updated.inferred_values),
+        len(updated.recent_themes),
+    )
+    return updated
 
 
 async def update_agent_profile(
@@ -106,9 +121,14 @@ async def update_agent_profile(
             max_output_tokens=500,
         )
     except LLMError:
+        logger.exception(
+            "agent_profile_update_failed_using_heuristic character=%s round_number=%d",
+            profile.character.value,
+            round_result.round_number,
+        )
         update = _heuristic_agent_update(profile, round_result)
 
-    return AgentProfile(
+    updated = AgentProfile(
         character=profile.character,
         successful_tactics=_dedupe(update.successful_tactics),
         failed_tactics=_dedupe(update.failed_tactics),
@@ -117,6 +137,16 @@ async def update_agent_profile(
         wins=profile.wins,
         losses=profile.losses,
     )
+    updated = attach_usage(updated, get_attached_usage(update))
+    logger.info(
+        "agent_profile_updated character=%s round_number=%d successful_tactics=%d "
+        "failed_tactics=%d",
+        updated.character.value,
+        round_result.round_number,
+        len(updated.successful_tactics),
+        len(updated.failed_tactics),
+    )
+    return updated
 
 
 def _heuristic_user_update(profile: UserProfile, round_result: Round) -> UserProfileUpdate:

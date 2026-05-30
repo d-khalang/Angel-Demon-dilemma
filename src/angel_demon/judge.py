@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from angel_demon.llm import LLMError, LLMProvider
+from angel_demon.logging_config import get_logger
 from angel_demon.models import Character, Opening, Rebuttal, Verdict
 from angel_demon.prompts import JUDGE_INSTRUCTIONS, judge_input
+
+logger = get_logger("judge")
 
 
 def fallback_verdict(round_number: int, reason: str | None = None) -> Verdict:
     winner = Character.SUNNY if round_number % 2 else Character.CROWLEY
+    logger.warning("judge_fallback_used round_number=%d winner=%s", round_number, winner.value)
     sunny_score = 6 if winner == Character.SUNNY else 5
     crowley_score = 6 if winner == Character.CROWLEY else 5
     return Verdict(
@@ -55,11 +59,25 @@ async def judge_debate(
             max_output_tokens=800,
         )
     except LLMError:
+        logger.exception("judge_debate_failed round_number=%d", round_number)
         return fallback_verdict(round_number)
 
     if verdict.sunny_score == verdict.crowley_score:
+        logger.warning(
+            "judge_equal_scores_adjusted round_number=%d winner=%s score=%d",
+            round_number,
+            verdict.winner.value,
+            verdict.sunny_score,
+        )
         if verdict.winner == Character.SUNNY:
             verdict.sunny_score = min(10, verdict.crowley_score + 1)
         else:
             verdict.crowley_score = min(10, verdict.sunny_score + 1)
+    logger.info(
+        "judge_debate_success round_number=%d winner=%s sunny_score=%d crowley_score=%d",
+        round_number,
+        verdict.winner.value,
+        verdict.sunny_score,
+        verdict.crowley_score,
+    )
     return verdict

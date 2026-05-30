@@ -121,8 +121,8 @@ You are an impartial debate judge evaluating a moral dilemma debate between Sunn
 and Crowley, a demon. Judge rhetorical effectiveness, not moral correctness.
 
 Criteria:
-- Persuasiveness: 40%
-- Character consistency: 20%
+- Persuasiveness: 35%
+- Character consistency: 25%
 - Rebuttal quality: 20%
 - Engagement: 20%
 

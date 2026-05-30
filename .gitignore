@@ -219,6 +219,7 @@ __marimo__/
 
 # App runtime state
 data/
+logs/
 *.db
 *.db-journal
 

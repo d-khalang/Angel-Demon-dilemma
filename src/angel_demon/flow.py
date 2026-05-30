@@ -8,34 +8,80 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from angel_demon.agents import (
-    generate_opening_stream,
-    generate_rebuttal_stream,
+    build_opening_messages,
+    build_rebuttal_messages,
     make_opening,
     make_rebuttal,
 )
 from angel_demon.config import Settings
 from angel_demon.judge import judge_debate
-from angel_demon.llm import LLMProvider, estimate_tokens
+from angel_demon.llm import (
+    LLMProvider,
+    LLMStreamChunk,
+    LLMUsage,
+    estimate_tokens,
+    get_attached_usage,
+)
+from angel_demon.logging_config import get_logger
 from angel_demon.memory import update_agent_profile, update_user_profile
 from angel_demon.models import Character, Round, SessionState, UserChoice
 from angel_demon.scoring import apply_alignment_delta, calculate_alignment_delta
 from angel_demon.state import SessionStore
 
 ChunkCallback = Callable[[str, str], None]
+logger = get_logger("flow")
 
 
 async def _collect_stream(
     role: str,
     stream,
     on_chunk: ChunkCallback | None,
-) -> tuple[str, int]:
+) -> tuple[str, int, LLMUsage]:
     chunks: list[str] = []
+    usage = LLMUsage()
     start = time.perf_counter()
+    logger.info("stream_collect_start role=%s", role)
     async for chunk in stream:
-        chunks.append(chunk)
+        if isinstance(chunk, LLMStreamChunk):
+            if chunk.usage is not None:
+                usage = chunk.usage
+            if not chunk.text:
+                continue
+            text_chunk = chunk.text
+        else:
+            text_chunk = chunk
+        chunks.append(text_chunk)
         if on_chunk:
-            on_chunk(role, chunk)
-    return "".join(chunks).strip(), int((time.perf_counter() - start) * 1000)
+            on_chunk(role, text_chunk)
+    text = "".join(chunks).strip()
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    logger.info(
+        "stream_collect_complete role=%s latency_ms=%d output_chars=%d",
+        role,
+        latency_ms,
+        len(text),
+    )
+    return text, latency_ms, usage
+
+
+def _usage_with_fallback(
+    usage: LLMUsage,
+    messages: list[dict[str, str]],
+    output_text: str,
+) -> LLMUsage:
+    return LLMUsage(
+        input_tokens=usage.input_tokens or estimate_tokens(messages),
+        output_tokens=usage.output_tokens or max(1, len(output_text) // 4),
+    )
+
+
+def _combine_usage(usages: list[LLMUsage]) -> LLMUsage:
+    input_tokens = sum(usage.input_tokens or 0 for usage in usages)
+    output_tokens = sum(usage.output_tokens or 0 for usage in usages)
+    return LLMUsage(
+        input_tokens=input_tokens or None,
+        output_tokens=output_tokens or None,
+    )
 
 
 async def run_debate_round(
@@ -49,59 +95,73 @@ async def run_debate_round(
 ) -> Round:
     round_number = len(session.rounds) + 1
     history = session.rounds[-3:]
+    logger.info(
+        "debate_round_start session_id=%s round_number=%d dilemma_chars=%d history_rounds=%d",
+        session.session_id,
+        round_number,
+        len(dilemma),
+        len(history),
+    )
 
-    sunny_stream = generate_opening_stream(
+    sunny_messages = build_opening_messages(
         Character.SUNNY,
         dilemma,
         session.user_profile,
         session.sunny_profile,
         session.crowley_profile,
         history,
-        llm,
-        temperature=settings.agent_temperature,
     )
-    sunny_text, sunny_latency = await _collect_stream("sunny_opening", sunny_stream, on_chunk)
+    sunny_stream = llm.stream(sunny_messages, settings.agent_temperature, 700)
+    sunny_text, sunny_latency, sunny_usage = await _collect_stream(
+        "sunny_opening",
+        sunny_stream,
+        on_chunk,
+    )
+    sunny_usage = _usage_with_fallback(sunny_usage, sunny_messages, sunny_text)
     sunny_opening = make_opening(Character.SUNNY, sunny_text)
+    logger.info("debate_step_complete round_number=%d step=sunny_opening", round_number)
     store.save_message(session.session_id, round_number, "sunny_opening", sunny_text)
     store.log_model_run(
         session.session_id,
         round_number,
         "sunny_opening",
         llm.model,
-        input_tokens=estimate_tokens([]),
-        output_tokens=max(1, len(sunny_text) // 4),
+        input_tokens=sunny_usage.input_tokens,
+        output_tokens=sunny_usage.output_tokens,
         latency_ms=sunny_latency,
         was_streamed=True,
     )
 
-    crowley_stream = generate_opening_stream(
+    crowley_messages = build_opening_messages(
         Character.CROWLEY,
         dilemma,
         session.user_profile,
         session.crowley_profile,
         session.sunny_profile,
         history,
-        llm,
-        temperature=settings.agent_temperature,
     )
-    crowley_text, crowley_latency = await _collect_stream(
+    crowley_stream = llm.stream(crowley_messages, settings.agent_temperature, 700)
+    crowley_text, crowley_latency, crowley_usage = await _collect_stream(
         "crowley_opening",
         crowley_stream,
         on_chunk,
     )
+    crowley_usage = _usage_with_fallback(crowley_usage, crowley_messages, crowley_text)
     crowley_opening = make_opening(Character.CROWLEY, crowley_text)
+    logger.info("debate_step_complete round_number=%d step=crowley_opening", round_number)
     store.save_message(session.session_id, round_number, "crowley_opening", crowley_text)
     store.log_model_run(
         session.session_id,
         round_number,
         "crowley_opening",
         llm.model,
-        output_tokens=max(1, len(crowley_text) // 4),
+        input_tokens=crowley_usage.input_tokens,
+        output_tokens=crowley_usage.output_tokens,
         latency_ms=crowley_latency,
         was_streamed=True,
     )
 
-    sunny_rebuttal_stream = generate_rebuttal_stream(
+    sunny_rebuttal_messages = build_rebuttal_messages(
         Character.SUNNY,
         dilemma,
         sunny_opening,
@@ -109,27 +169,33 @@ async def run_debate_round(
         session.user_profile,
         session.sunny_profile,
         session.crowley_profile,
-        llm,
-        temperature=settings.agent_temperature,
     )
-    sunny_rebuttal_text, sunny_rebuttal_latency = await _collect_stream(
+    sunny_rebuttal_stream = llm.stream(sunny_rebuttal_messages, settings.agent_temperature, 500)
+    sunny_rebuttal_text, sunny_rebuttal_latency, sunny_rebuttal_usage = await _collect_stream(
         "sunny_rebuttal",
         sunny_rebuttal_stream,
         on_chunk,
     )
+    sunny_rebuttal_usage = _usage_with_fallback(
+        sunny_rebuttal_usage,
+        sunny_rebuttal_messages,
+        sunny_rebuttal_text,
+    )
     sunny_rebuttal = make_rebuttal(Character.SUNNY, sunny_rebuttal_text)
+    logger.info("debate_step_complete round_number=%d step=sunny_rebuttal", round_number)
     store.save_message(session.session_id, round_number, "sunny_rebuttal", sunny_rebuttal_text)
     store.log_model_run(
         session.session_id,
         round_number,
         "sunny_rebuttal",
         llm.model,
-        output_tokens=max(1, len(sunny_rebuttal_text) // 4),
+        input_tokens=sunny_rebuttal_usage.input_tokens,
+        output_tokens=sunny_rebuttal_usage.output_tokens,
         latency_ms=sunny_rebuttal_latency,
         was_streamed=True,
     )
 
-    crowley_rebuttal_stream = generate_rebuttal_stream(
+    crowley_rebuttal_messages = build_rebuttal_messages(
         Character.CROWLEY,
         dilemma,
         crowley_opening,
@@ -137,26 +203,31 @@ async def run_debate_round(
         session.user_profile,
         session.crowley_profile,
         session.sunny_profile,
-        llm,
-        temperature=settings.agent_temperature,
     )
-    crowley_rebuttal_text, crowley_rebuttal_latency = await _collect_stream(
+    crowley_rebuttal_stream = llm.stream(crowley_rebuttal_messages, settings.agent_temperature, 500)
+    crowley_rebuttal_text, crowley_rebuttal_latency, crowley_rebuttal_usage = await _collect_stream(
         "crowley_rebuttal",
         crowley_rebuttal_stream,
         on_chunk,
     )
+    crowley_rebuttal_usage = _usage_with_fallback(
+        crowley_rebuttal_usage,
+        crowley_rebuttal_messages,
+        crowley_rebuttal_text,
+    )
     crowley_rebuttal = make_rebuttal(Character.CROWLEY, crowley_rebuttal_text)
+    logger.info("debate_step_complete round_number=%d step=crowley_rebuttal", round_number)
     store.save_message(session.session_id, round_number, "crowley_rebuttal", crowley_rebuttal_text)
     store.log_model_run(
         session.session_id,
         round_number,
         "crowley_rebuttal",
         llm.model,
-        output_tokens=max(1, len(crowley_rebuttal_text) // 4),
+        input_tokens=crowley_rebuttal_usage.input_tokens,
+        output_tokens=crowley_rebuttal_usage.output_tokens,
         latency_ms=crowley_rebuttal_latency,
         was_streamed=True,
     )
-
     judge_start = time.perf_counter()
     verdict = await judge_debate(
         dilemma,
@@ -168,15 +239,24 @@ async def run_debate_round(
         round_number=round_number,
         temperature=settings.judge_temperature,
     )
+    judge_usage = get_attached_usage(verdict)
     store.log_model_run(
         session.session_id,
         round_number,
         "judge",
         llm.model,
-        output_tokens=max(1, len(verdict.model_dump_json()) // 4),
+        input_tokens=judge_usage.input_tokens,
+        output_tokens=judge_usage.output_tokens or max(1, len(verdict.model_dump_json()) // 4),
         latency_ms=int((time.perf_counter() - judge_start) * 1000),
         was_streamed=False,
         error="fallback" if verdict.is_fallback else None,
+    )
+    logger.info(
+        "debate_judged session_id=%s round_number=%d winner=%s fallback=%s",
+        session.session_id,
+        round_number,
+        verdict.winner.value,
+        verdict.is_fallback,
     )
 
     round_data = Round(
@@ -190,6 +270,11 @@ async def run_debate_round(
         timestamp=datetime.now(UTC),
     )
     store.save_message(session.session_id, round_number, "judge_verdict", verdict.model_dump_json())
+    logger.info(
+        "debate_round_complete session_id=%s round_number=%d",
+        session.session_id,
+        round_number,
+    )
     return round_data
 
 
@@ -215,6 +300,15 @@ async def apply_user_choice(
         session.crowley_profile.wins += 1
         session.sunny_profile.losses += 1
 
+    logger.info(
+        "apply_user_choice_start session_id=%s round_number=%d choice=%s "
+        "alignment_delta=%d alignment_after=%d",
+        session.session_id,
+        current_round.round_number,
+        choice.value,
+        current_round.alignment_delta,
+        session.alignment_score,
+    )
     memory_start = time.perf_counter()
     session.user_profile, session.sunny_profile, session.crowley_profile = await asyncio.gather(
         update_user_profile(
@@ -238,11 +332,20 @@ async def apply_user_choice(
             temperature=settings.memory_temperature,
         ),
     )
+    memory_usage = _combine_usage(
+        [
+            get_attached_usage(session.user_profile),
+            get_attached_usage(session.sunny_profile),
+            get_attached_usage(session.crowley_profile),
+        ]
+    )
     store.log_model_run(
         session.session_id,
         current_round.round_number,
         "memory_updates",
         llm.model,
+        input_tokens=memory_usage.input_tokens,
+        output_tokens=memory_usage.output_tokens,
         latency_ms=int((time.perf_counter() - memory_start) * 1000),
     )
 
@@ -256,4 +359,12 @@ async def apply_user_choice(
     )
     store.save_round(session.session_id, current_round)
     store.save_session(session)
+    logger.info(
+        "apply_user_choice_complete session_id=%s round_number=%d sunny_wins=%d "
+        "crowley_wins=%d",
+        session.session_id,
+        current_round.round_number,
+        session.sunny_profile.wins,
+        session.crowley_profile.wins,
+    )
     return session
