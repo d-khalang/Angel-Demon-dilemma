@@ -59,92 +59,111 @@ class SessionStore:
     def _init_db(self) -> None:
         with self._connect() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version and version < SCHEMA_VERSION:
-                logger.warning(
-                    "resetting_legacy_sqlite_schema db_path=%s old_version=%s new_version=%s",
-                    self.db_path,
-                    version,
-                    SCHEMA_VERSION,
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Database schema version {version} is newer than supported "
+                    f"version {SCHEMA_VERSION}."
                 )
-                self._drop_schema(conn)
-            elif version == 0 and self._has_legacy_sessions_table(conn):
-                logger.warning(
-                    "resetting_unversioned_legacy_sqlite_schema db_path=%s",
-                    self.db_path,
-                )
-                self._drop_schema(conn)
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id      TEXT PRIMARY KEY,
-                    display_name TEXT NOT NULL,
-                    created_at   TEXT NOT NULL,
-                    updated_at   TEXT NOT NULL
-                );
 
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id      TEXT PRIMARY KEY,
-                    user_id         TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                    alignment       INTEGER NOT NULL DEFAULT 0,
-                    user_profile    TEXT NOT NULL,
-                    sunny_profile   TEXT NOT NULL,
-                    crowley_profile TEXT NOT NULL,
-                    created_at      TEXT NOT NULL,
-                    updated_at      TEXT NOT NULL
-                );
+            if version < 2 and self._has_legacy_sessions_table(conn):
+                self._migrate_legacy_sessions_to_users(conn)
 
-                CREATE TABLE IF NOT EXISTS rounds (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-                    round_number    INTEGER NOT NULL,
-                    dilemma         TEXT NOT NULL,
-                    round_data      TEXT NOT NULL,
-                    created_at      TEXT NOT NULL,
-                    UNIQUE(session_id, round_number)
-                );
+            self._create_schema(conn)
 
-                CREATE TABLE IF NOT EXISTS messages (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-                    round_number    INTEGER NOT NULL,
-                    role            TEXT NOT NULL,
-                    content         TEXT NOT NULL,
-                    created_at      TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS model_runs (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-                    round_number    INTEGER NOT NULL,
-                    call_type       TEXT NOT NULL,
-                    model           TEXT NOT NULL,
-                    input_tokens    INTEGER,
-                    output_tokens   INTEGER,
-                    latency_ms      INTEGER,
-                    was_streamed    INTEGER NOT NULL DEFAULT 0,
-                    error           TEXT,
-                    created_at      TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-                CREATE INDEX IF NOT EXISTS idx_rounds_session ON rounds(session_id);
-                CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-                CREATE INDEX IF NOT EXISTS idx_model_runs_session ON model_runs(session_id);
-                PRAGMA user_version = 2;
-                """
-            )
-
-    def _drop_schema(self, conn: sqlite3.Connection) -> None:
+    def _create_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
             """
-            DROP TABLE IF EXISTS model_runs;
-            DROP TABLE IF EXISTS messages;
-            DROP TABLE IF EXISTS rounds;
-            DROP TABLE IF EXISTS sessions;
-            DROP TABLE IF EXISTS users;
-            PRAGMA user_version = 0;
+            CREATE TABLE IF NOT EXISTS users (
+                user_id      TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id      TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                alignment       INTEGER NOT NULL DEFAULT 0,
+                user_profile    TEXT NOT NULL,
+                sunny_profile   TEXT NOT NULL,
+                crowley_profile TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS rounds (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                round_number    INTEGER NOT NULL,
+                dilemma         TEXT NOT NULL,
+                round_data      TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                UNIQUE(session_id, round_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                round_number    INTEGER NOT NULL,
+                role            TEXT NOT NULL,
+                content         TEXT NOT NULL,
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS model_runs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                round_number    INTEGER NOT NULL,
+                call_type       TEXT NOT NULL,
+                model           TEXT NOT NULL,
+                input_tokens    INTEGER,
+                output_tokens   INTEGER,
+                latency_ms      INTEGER,
+                was_streamed    INTEGER NOT NULL DEFAULT 0,
+                error           TEXT,
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_rounds_session ON rounds(session_id);
+            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+            CREATE INDEX IF NOT EXISTS idx_model_runs_session ON model_runs(session_id);
+            PRAGMA user_version = 2;
             """
         )
+
+    def _migrate_legacy_sessions_to_users(self, conn: sqlite3.Connection) -> None:
+        now = _now_iso()
+        default_user_id = str(uuid4())
+        logger.warning(
+            "migrating_legacy_sqlite_schema db_path=%s target_version=%s",
+            self.db_path,
+            SCHEMA_VERSION,
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id      TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO users (user_id, display_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (default_user_id, DEFAULT_USER_NAME, now, now),
+        )
+        conn.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
+        conn.execute(
+            "UPDATE sessions SET user_id = ? WHERE user_id IS NULL",
+            (default_user_id,),
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+        conn.execute("PRAGMA user_version = 2")
 
     def _has_legacy_sessions_table(self, conn: sqlite3.Connection) -> bool:
         table = conn.execute(
@@ -293,7 +312,22 @@ class SessionStore:
             len(session.rounds),
         )
 
-    def transfer_session(self, session_id: str, user_id: str) -> SessionState | None:
+    def claim_anonymous_session(self, session_id: str, user_id: str) -> SessionState | None:
+        session = self.load_session(session_id)
+        if session is None:
+            logger.info("anonymous_session_claim_miss session_id=%s", session_id)
+            return None
+        current_owner = self.load_user(session.user_id)
+        if current_owner is None or current_owner.display_name != DEFAULT_USER_NAME:
+            logger.warning(
+                "anonymous_session_claim_rejected session_id=%s current_user_id=%s",
+                session_id,
+                session.user_id,
+            )
+            return session
+        return self._transfer_session(session_id, user_id)
+
+    def _transfer_session(self, session_id: str, user_id: str) -> SessionState | None:
         if self.load_user(user_id) is None:
             raise ValueError(f"Unknown user_id: {user_id}")
         now = _now_iso()
@@ -312,7 +346,7 @@ class SessionStore:
             )
         session = self.load_session(session_id)
         logger.info(
-            "session_transferred session_id=%s user_id=%s found=%s",
+            "anonymous_session_claimed session_id=%s user_id=%s found=%s",
             session_id,
             user_id,
             session is not None,

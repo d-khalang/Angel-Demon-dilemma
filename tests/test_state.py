@@ -1,4 +1,14 @@
-from angel_demon.models import Character, Opening, Rebuttal, Round, Verdict
+from datetime import UTC, datetime
+
+from angel_demon.models import (
+    AgentProfile,
+    Character,
+    Opening,
+    Rebuttal,
+    Round,
+    UserProfile,
+    Verdict,
+)
 from angel_demon.state import SessionStore
 
 
@@ -22,6 +32,19 @@ def sample_round() -> Round:
             persuasion_tactics_crowley=["family loyalty"],
             key_moment="Crowley reframed love as loyalty.",
         ),
+    )
+
+
+def store_session_payload() -> tuple[str, int, str, str, str, str, str]:
+    now = datetime.now(UTC).isoformat()
+    return (
+        "legacy-session",
+        7,
+        UserProfile().model_dump_json(),
+        AgentProfile(character=Character.SUNNY).model_dump_json(),
+        AgentProfile(character=Character.CROWLEY).model_dump_json(),
+        now,
+        now,
     )
 
 
@@ -93,7 +116,7 @@ def test_default_user_is_stable(tmp_path) -> None:
     assert store.get_or_create_default_user().user_id == default_user.user_id
 
 
-def test_transfer_session_moves_existing_rounds_to_new_user(tmp_path) -> None:
+def test_claim_anonymous_session_moves_existing_rounds_to_new_user(tmp_path) -> None:
     store = SessionStore(tmp_path / "state.db")
     anonymous_session = store.create_session()
     new_user = store.create_user("Noor")
@@ -102,13 +125,66 @@ def test_transfer_session_moves_existing_rounds_to_new_user(tmp_path) -> None:
     store.save_message(anonymous_session.session_id, 1, "sunny_opening", "Be kind.")
     store.log_model_run(anonymous_session.session_id, 1, "opening", "gpt-5.4")
 
-    transferred = store.transfer_session(anonymous_session.session_id, new_user.user_id)
+    transferred = store.claim_anonymous_session(anonymous_session.session_id, new_user.user_id)
 
     assert transferred is not None
     assert transferred.user_id == new_user.user_id
     assert transferred.rounds[0].dilemma == round_data.dilemma
     assert store.list_sessions(new_user.user_id)[0]["session_id"] == anonymous_session.session_id
     assert store.list_messages(anonymous_session.session_id)[0]["role"] == "sunny_opening"
+
+
+def test_claim_anonymous_session_rejects_named_user_session(tmp_path) -> None:
+    store = SessionStore(tmp_path / "state.db")
+    first_user = store.create_user("First User")
+    second_user = store.create_user("Second User")
+    session = store.create_session(first_user.user_id)
+
+    claimed = store.claim_anonymous_session(session.session_id, second_user.user_id)
+
+    assert claimed is not None
+    assert claimed.user_id == first_user.user_id
+
+
+def test_legacy_sessions_schema_is_migrated_without_dropping_data(tmp_path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            session_id      TEXT PRIMARY KEY,
+            alignment       INTEGER NOT NULL DEFAULT 0,
+            user_profile    TEXT NOT NULL,
+            sunny_profile   TEXT NOT NULL,
+            crowley_profile TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        );
+        """
+    )
+    session = store_session_payload()
+    conn.execute(
+        """
+        INSERT INTO sessions (
+            session_id, alignment, user_profile, sunny_profile, crowley_profile,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        session,
+    )
+    conn.commit()
+    conn.close()
+
+    store = SessionStore(db_path)
+    sessions = store.list_sessions()
+    users = store.list_users()
+
+    assert len(users) == 1
+    assert sessions[0]["session_id"] == session[0]
+    assert sessions[0]["user_id"] == users[0].user_id
 
 
 def test_delete_session_cascades_related_rows(tmp_path) -> None:
