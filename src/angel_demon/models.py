@@ -81,8 +81,16 @@ class AgentProfile(BaseModel):
     losses: int = 0
 
 
+class User(BaseModel):
+    user_id: str
+    display_name: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class SessionState(BaseModel):
     session_id: str
+    user_id: str
     rounds: list[Round] = Field(default_factory=list)
     alignment_score: int = 0
     user_profile: UserProfile = Field(default_factory=UserProfile)
