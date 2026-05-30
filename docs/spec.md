@@ -248,8 +248,15 @@ class AgentProfile(BaseModel):
     wins: int = 0
     losses: int = 0
 
+class User(BaseModel):
+    user_id: str
+    display_name: str
+    created_at: datetime
+    updated_at: datetime
+
 class SessionState(BaseModel):
     session_id: str
+    user_id: str
     rounds: list[Round] = Field(default_factory=list)
     alignment_score: int = 0                               # -100 to +100
     user_profile: UserProfile
@@ -264,9 +271,18 @@ class SessionState(BaseModel):
 ### 4.3 Database Schema (SQLite)
 
 ```sql
+-- Local user scope. This is not authentication; it is session/data ownership.
+CREATE TABLE IF NOT EXISTS users (
+    user_id      TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
 -- Core session state
 CREATE TABLE IF NOT EXISTS sessions (
     session_id      TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     alignment       INTEGER NOT NULL DEFAULT 0,
     user_profile    TEXT NOT NULL,       -- JSON blob (UserProfile)
     sunny_profile   TEXT NOT NULL,       -- JSON blob (AgentProfile)
@@ -314,6 +330,7 @@ CREATE TABLE IF NOT EXISTS model_runs (
     created_at      TEXT NOT NULL
 );
 
+CREATE INDEX idx_sessions_user ON sessions(user_id);
 CREATE INDEX idx_rounds_session ON rounds(session_id);
 CREATE INDEX idx_messages_session ON messages(session_id);
 CREATE INDEX idx_model_runs_session ON model_runs(session_id);
@@ -705,8 +722,14 @@ class SessionStore:
     def __init__(self, db_path: str = "data/state.db"):
         """Initialize the store and create tables if they don't exist."""
 
-    def create_session(self) -> SessionState:
-        """Create a new session with default profiles."""
+    def create_user(self, display_name: str) -> User:
+        """Create a local user profile."""
+
+    def list_users(self) -> list[User]:
+        """List local users ordered by recent activity."""
+
+    def create_session(self, user_id: str | None = None) -> SessionState:
+        """Create a new session with default profiles for a user."""
 
     def load_session(self, session_id: str) -> SessionState | None:
         """Load a session from the database. Returns None if not found."""
@@ -717,11 +740,14 @@ class SessionStore:
     def save_round(self, session_id: str, round_data: Round) -> None:
         """Persist a completed round."""
 
-    def list_sessions(self) -> list[dict]:
-        """Return a summary list of all sessions (id, alignment, round count, last updated)."""
+    def list_sessions(self, user_id: str | None = None) -> list[dict]:
+        """Return session summaries, optionally scoped to one user."""
 
     def delete_session(self, session_id: str) -> None:
         """Delete a session and its rounds."""
+
+    def delete_user(self, user_id: str) -> None:
+        """Delete a local user and cascade their sessions."""
 ```
 
 #### Default Profiles

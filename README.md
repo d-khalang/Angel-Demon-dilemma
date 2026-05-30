@@ -9,7 +9,7 @@ Angel vs Demon is a moral dilemma debate app built for the Luxia AI Engineer ass
 - The judge uses structured JSON output to choose a winner, score the debate, and extract persuasion tactics.
 - The user chooses which side to follow, shifting alignment toward Heaven or Hell.
 - Agent memory adapts future arguments based on what worked.
-- SQLite stores sessions, rounds, messages, and model-run metadata.
+- Local user profiles keep sessions, rounds, messages, and model-run metadata separated.
 
 ## Setup
 
@@ -56,18 +56,22 @@ Character calls produce streamed plain text only. Structured data is created in 
 
 ## Engineering Notes
 
-The repo includes a reusable project skill at `docs/skills/python-sqlite-modern/SKILL.md`. It captures the current Python `sqlite3` best practices used in this project, including Python 3.12+ `autocommit` behavior, explicit connection closing, foreign-key enforcement, WAL mode, and busy timeouts. I included it because the SQLite integration was updated after checking the official Python and SQLite documentation.
+The repo includes reusable project skills under `docs/skills/`:
+
+- `python-sqlite-modern`: current Python `sqlite3` best practices used in this project, including Python 3.12+ `autocommit` behavior, explicit connection closing, foreign-key enforcement, WAL mode, and busy timeouts.
+- `openai-responses-streaming`: OpenAI Responses API streaming guidance, including how to read final streamed usage from `response.completed` without using Chat Completions-only `stream_options.include_usage`.
 
 ## Database
 
 SQLite is used for the prototype:
 
-- `sessions`: current alignment and compact user/agent profiles.
+- `users`: local user profiles for separating sessions without requiring auth.
+- `sessions`: per-user alignment and compact user/agent profiles.
 - `rounds`: full structured round snapshots.
 - `messages`: flat transcript history for replay/debugging.
 - `model_runs`: model, latency, token estimates, streaming flag, and error metadata.
 
-For production, this would move to PostgreSQL with JSONB columns, migrations, per-user auth, and retention/deletion controls.
+The current user model is deliberately local and unauthenticated, which is appropriate for this Streamlit prototype. It gives the database the same ownership shape a production system would need, while keeping login/session security out of scope. For production, this would move to PostgreSQL with JSONB columns, migrations, real authentication, authorization checks, and retention/deletion controls.
 
 ## Scoring
 
@@ -90,14 +94,34 @@ mypy src
 
 The tests focus on deterministic logic: scoring, SQLite persistence, and judge fallback behavior. The LLM provider is mocked in tests so they do not spend tokens.
 
+## Logging And Debugging
+
+The app logs to both the terminal and a rotating local log file:
+
+```env
+LOG_LEVEL=INFO
+LOG_FILE=logs/angel_demon.log
+LOG_LLM_PAYLOADS=false
+```
+
+Use `LOG_LEVEL=DEBUG` for more detailed connection and request tracing. Set `LOG_LLM_PAYLOADS=true` only when you intentionally want prompts and model outputs in the log file; leave it off for normal use because dilemmas may contain sensitive text.
+
+Useful checks:
+
+```bash
+python scripts/check_openai_key.py
+```
+
+The SQLite database also records transcripts and model-run metadata in `messages` and `model_runs`, so you can inspect both the application log and durable round history.
+
 ## Production Plan
 
 To take this beyond a prototype:
 
 - Replace Streamlit with a React/Next.js frontend and FastAPI backend.
 - Use WebSockets or server-sent events for debate streaming.
-- Store users, sessions, profiles, and traces in PostgreSQL.
-- Add authentication, rate limits, cost ceilings, and per-user deletion.
+- Store users, sessions, profiles, and traces in PostgreSQL with migrations.
+- Add authentication, authorization, rate limits, cost ceilings, and per-user deletion.
 - Add OpenTelemetry traces and dashboard metrics for latency, cost, and failures.
 - Build eval sets for character consistency, judge stability, safety, and prompt regressions.
 - Add content moderation before and after model calls for high-risk dilemmas.

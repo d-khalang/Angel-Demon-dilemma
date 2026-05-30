@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenAI Responses Streaming"
+  short_description: "Use official Responses API streaming patterns."
+  default_prompt: "Use the OpenAI Responses streaming skill to update or review code that streams Responses API events."
