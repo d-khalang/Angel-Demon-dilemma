@@ -102,7 +102,7 @@ def render_conversation(messages) -> None:
         render_chat_message(message.speaker, message.content)
 
 
-def choose_dilemma() -> str:
+def choose_dilemma() -> tuple[str, bool]:
     st.subheader("Dilemma")
     preset_titles = ["Custom"] + [item["title"] for item in PRESET_DILEMMAS]
     selected = st.selectbox("Preset", preset_titles, label_visibility="collapsed")
@@ -111,12 +111,15 @@ def choose_dilemma() -> str:
         default_text = next(
             item["description"] for item in PRESET_DILEMMAS if item["title"] == selected
         )
-    return st.text_area(
-        "Enter a dilemma",
-        value=default_text,
-        height=110,
-        placeholder="Should I protect someone I love if it means hurting strangers?",
-    )
+    with st.form("dilemma_form"):
+        dilemma = st.text_area(
+            "Enter a dilemma",
+            value=default_text,
+            height=110,
+            placeholder="Should I protect someone I love if it means hurting strangers?",
+        )
+        submitted = st.form_submit_button("Start debate", type="primary")
+    return dilemma, submitted
 
 
 def make_stream_placeholders(target: ResponseTarget) -> dict[str, Any]:

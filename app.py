@@ -86,12 +86,13 @@ def main() -> None:
     round_data = ui_state.get_current_round()
 
     if draft is None and round_data is None:
-        dilemma = choose_dilemma()
-        is_valid, validation_error = validate_dilemma(dilemma)
-        if not is_valid:
-            st.caption(validation_error)
+        dilemma, submitted = choose_dilemma()
 
-        if st.button("Start debate", type="primary", disabled=not is_valid):
+        if submitted:
+            is_valid, validation_error = validate_dilemma(dilemma)
+            if not is_valid:
+                st.caption(validation_error)
+                return
             logger = get_logger("app")
             logger.info(
                 "ui_start_debate_clicked session_id=%s dilemma_chars=%d",
