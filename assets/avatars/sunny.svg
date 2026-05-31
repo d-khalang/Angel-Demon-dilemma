@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Sunny avatar">
+  <defs>
+    <radialGradient id="sunny-bg" cx="50%" cy="42%" r="62%">
+      <stop offset="0%" stop-color="#fff7c2"/>
+      <stop offset="55%" stop-color="#f5c84b"/>
+      <stop offset="100%" stop-color="#d98f19"/>
+    </radialGradient>
+    <linearGradient id="wing" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f1d98a"/>
+    </linearGradient>
+    <filter id="glow" x="-35%" y="-35%" width="170%" height="170%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#2f3546"/>
+  <circle cx="128" cy="134" r="93" fill="url(#sunny-bg)" opacity=".96"/>
+  <ellipse cx="128" cy="60" rx="54" ry="15" fill="none" stroke="#fff2a6" stroke-width="11" filter="url(#glow)"/>
+  <path d="M101 125c-22-34-57-39-78-22 12 25 38 52 77 55z" fill="url(#wing)" opacity=".92"/>
+  <path d="M155 125c22-34 57-39 78-22-12 25-38 52-77 55z" fill="url(#wing)" opacity=".92"/>
+  <circle cx="128" cy="123" r="39" fill="#fff2cc"/>
+  <path d="M77 210c9-43 30-68 51-68s42 25 51 68z" fill="#fff5d7"/>
+  <path d="M103 124c15 15 35 15 50 0" fill="none" stroke="#8a5c14" stroke-linecap="round" stroke-width="7"/>
+  <circle cx="112" cy="111" r="5" fill="#6f4711"/>
+  <circle cx="144" cy="111" r="5" fill="#6f4711"/>
+  <path d="M78 209h100c-11 17-28 29-50 29s-39-12-50-29z" fill="#f3ba32"/>
+</svg>
