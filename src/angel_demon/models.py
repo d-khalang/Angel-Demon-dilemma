@@ -19,6 +19,19 @@ class UserChoice(StrEnum):
     UNDECIDED = "undecided"
 
 
+class ConversationSpeaker(StrEnum):
+    USER = "user"
+    SUNNY = "sunny"
+    CROWLEY = "crowley"
+    JUDGE = "judge"
+
+
+class ResponseTarget(StrEnum):
+    BOTH = "both"
+    SUNNY = "sunny"
+    CROWLEY = "crowley"
+
+
 class AlignmentZone(StrEnum):
     DEEP_HELL = "deep_hell"
     HELL = "hell"
@@ -37,6 +50,13 @@ class Rebuttal(BaseModel):
     argument: str
 
 
+class ConversationMessage(BaseModel):
+    speaker: ConversationSpeaker
+    content: str
+    target: ResponseTarget | Character | None = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class Verdict(BaseModel):
     winner: Character
     reason: str
@@ -52,6 +72,7 @@ class Verdict(BaseModel):
 class Round(BaseModel):
     round_number: int
     dilemma: str
+    conversation: list[ConversationMessage] = Field(default_factory=list)
     sunny_opening: Opening
     crowley_opening: Opening
     sunny_rebuttal: Rebuttal
@@ -60,6 +81,13 @@ class Round(BaseModel):
     user_choice: UserChoice | None = None
     alignment_delta: int = 0
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ConversationDraft(BaseModel):
+    round_number: int
+    dilemma: str
+    messages: list[ConversationMessage] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class UserProfile(BaseModel):

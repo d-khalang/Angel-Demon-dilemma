@@ -10,10 +10,18 @@ from angel_demon.dilemmas import validate_dilemma
 from angel_demon.flow import apply_user_choice
 from angel_demon.llm import LLMConfigurationError, LLMError, create_llm_provider
 from angel_demon.logging_config import get_logger, setup_logging
-from angel_demon.models import UserChoice
+from angel_demon.models import ResponseTarget, UserChoice
 from angel_demon.state import SessionStore
 from angel_demon.ui import session_state as ui_state
-from angel_demon.ui.debate import choose_dilemma, generate_round, render_round, render_transcript
+from angel_demon.ui.debate import (
+    choose_dilemma,
+    continue_chat_round,
+    judge_chat_round,
+    render_conversation,
+    render_round,
+    render_transcript,
+    start_chat_round,
+)
 from angel_demon.ui.session_controller import get_active_session, get_active_user
 from angel_demon.ui.sidebar import render_sidebar
 
@@ -51,18 +59,11 @@ def get_resources():
     return settings, store, llm
 
 
-def render_streaming_placeholders() -> dict[str, object]:
-    st.subheader("Debate")
-    placeholders = {}
-    for role, title in (
-        ("sunny_opening", "Sunny opening"),
-        ("crowley_opening", "Crowley opening"),
-        ("sunny_rebuttal", "Sunny rebuttal"),
-        ("crowley_rebuttal", "Crowley rebuttal"),
-    ):
-        st.markdown(f"#### {title}")
-        placeholders[role] = st.empty()
-    return placeholders
+TARGET_LABELS = {
+    "Both": ResponseTarget.BOTH,
+    "Sunny": ResponseTarget.SUNNY,
+    "Crowley": ResponseTarget.CROWLEY,
+}
 
 
 def main() -> None:
@@ -81,30 +82,33 @@ def main() -> None:
     session = get_active_session(store, active_user.user_id)
     render_sidebar(active_user, session, store)
 
-    dilemma = choose_dilemma()
-    is_valid, validation_error = validate_dilemma(dilemma)
-    can_start = is_valid and not ui_state.has_current_round()
+    draft = ui_state.get_current_draft()
+    round_data = ui_state.get_current_round()
 
-    if not is_valid:
-        st.caption(validation_error)
+    if draft is None and round_data is None:
+        dilemma = choose_dilemma()
+        is_valid, validation_error = validate_dilemma(dilemma)
+        if not is_valid:
+            st.caption(validation_error)
 
-    if st.button("Start debate", type="primary", disabled=not can_start):
-        logger = get_logger("app")
-        logger.info(
-            "ui_start_debate_clicked session_id=%s dilemma_chars=%d",
-            session.session_id,
-            len(dilemma),
-        )
-        ui_state.clear_current_round()
-        placeholders = render_streaming_placeholders()
-        with st.spinner("Sunny and Crowley are preparing their arguments..."):
+        if st.button("Start debate", type="primary", disabled=not is_valid):
+            logger = get_logger("app")
+            logger.info(
+                "ui_start_debate_clicked session_id=%s dilemma_chars=%d",
+                session.session_id,
+                len(dilemma),
+            )
+            ui_state.clear_current_round()
+            ui_state.clear_current_draft()
+            with st.chat_message("user"):
+                st.write(dilemma)
             try:
-                round_data = asyncio.run(
-                    generate_round(session, dilemma, settings, store, llm, placeholders)
+                draft = asyncio.run(
+                    start_chat_round(session, dilemma, settings, store, llm)
                 )
             except LLMError as exc:
                 logger.exception(
-                    "ui_debate_generation_failed session_id=%s error=%s",
+                    "ui_debate_start_failed session_id=%s error=%s",
                     session.session_id,
                     exc,
                 )
@@ -114,15 +118,65 @@ def main() -> None:
                 )
                 st.caption(str(exc))
                 return
-        ui_state.set_current_round(round_data)
-        logger.info(
-            "ui_debate_generation_completed session_id=%s round_number=%d winner=%s",
-            session.session_id,
-            round_data.round_number,
-            round_data.verdict.winner.value,
-        )
+            ui_state.set_current_draft(draft)
+            st.rerun()
 
-    round_data = ui_state.get_current_round()
+    if draft is not None:
+        render_conversation(draft.messages)
+        with st.bottom:
+            selected_target = st.segmented_control(
+                "Reply to",
+                options=list(TARGET_LABELS.keys()),
+                default="Both",
+                key="reply_target",
+            )
+            col_a, col_b = st.columns([1, 2])
+            if col_a.button("Judge current debate", use_container_width=True):
+                with st.status("Judging the debate...", expanded=False):
+                    try:
+                        round_data = asyncio.run(
+                            judge_chat_round(session, draft, settings, store, llm)
+                        )
+                    except LLMError as exc:
+                        get_logger("app").exception(
+                            "ui_conversation_judge_failed session_id=%s error=%s",
+                            session.session_id,
+                            exc,
+                        )
+                        st.error(
+                            "The judge request failed. Check your API key, model access, "
+                            "and project quota, then try again."
+                        )
+                        st.caption(str(exc))
+                        return
+                ui_state.set_current_round(round_data)
+                ui_state.clear_current_draft()
+                st.rerun()
+            col_b.caption("Add context, challenge an agent, or ask one side directly.")
+            prompt = st.chat_input("Add a follow-up or question")
+        if prompt:
+            target = TARGET_LABELS[str(selected_target or "Both")]
+            with st.chat_message("user"):
+                st.write(prompt)
+            try:
+                draft = asyncio.run(
+                    continue_chat_round(session, draft, prompt, target, settings, store, llm)
+                )
+            except LLMError as exc:
+                get_logger("app").exception(
+                    "ui_conversation_followup_failed session_id=%s error=%s",
+                    session.session_id,
+                    exc,
+                )
+                st.error(
+                    "The OpenAI request failed before the agents could respond. "
+                    "Check your API key, model access, and project quota, then try again."
+                )
+                st.caption(str(exc))
+                return
+            ui_state.set_current_draft(draft)
+            st.rerun()
+
     if round_data and not round_data.user_choice:
         render_transcript(round_data)
         render_round(round_data)
@@ -153,9 +207,10 @@ def main() -> None:
                 )
                 ui_state.set_session_id(updated.session_id)
                 ui_state.clear_current_round()
+                ui_state.clear_current_draft()
                 st.rerun()
 
-    if session.rounds:
+    if session.rounds and draft is None and round_data is None:
         st.subheader("Latest completed round")
         render_round(session.rounds[-1])
 

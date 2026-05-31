@@ -8,13 +8,14 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from angel_demon.agents import (
+    build_conversation_turn_messages,
     build_opening_messages,
     build_rebuttal_messages,
     make_opening,
     make_rebuttal,
 )
 from angel_demon.config import Settings
-from angel_demon.judge import judge_debate
+from angel_demon.judge import judge_conversation, judge_debate
 from angel_demon.llm import (
     LLMProvider,
     LLMStreamChunk,
@@ -24,7 +25,18 @@ from angel_demon.llm import (
 )
 from angel_demon.logging_config import get_logger
 from angel_demon.memory import update_agent_profile, update_user_profile
-from angel_demon.models import Character, Round, SessionState, UserChoice
+from angel_demon.models import (
+    Character,
+    ConversationDraft,
+    ConversationMessage,
+    ConversationSpeaker,
+    Opening,
+    Rebuttal,
+    ResponseTarget,
+    Round,
+    SessionState,
+    UserChoice,
+)
 from angel_demon.scoring import apply_alignment_delta, calculate_alignment_delta
 from angel_demon.state import SessionStore
 
@@ -82,6 +94,206 @@ def _combine_usage(usages: list[LLMUsage]) -> LLMUsage:
         input_tokens=input_tokens or None,
         output_tokens=output_tokens or None,
     )
+
+
+def _agent_profile_for(session: SessionState, character: Character):
+    return session.sunny_profile if character == Character.SUNNY else session.crowley_profile
+
+
+def _opponent_profile_for(session: SessionState, character: Character):
+    return session.crowley_profile if character == Character.SUNNY else session.sunny_profile
+
+
+def _speaker_for(character: Character) -> ConversationSpeaker:
+    return (
+        ConversationSpeaker.SUNNY
+        if character == Character.SUNNY
+        else ConversationSpeaker.CROWLEY
+    )
+
+
+def _characters_for_target(target: ResponseTarget) -> list[Character]:
+    if target == ResponseTarget.SUNNY:
+        return [Character.SUNNY]
+    if target == ResponseTarget.CROWLEY:
+        return [Character.CROWLEY]
+    return [Character.SUNNY, Character.CROWLEY]
+
+
+async def _append_agent_response(
+    draft: ConversationDraft,
+    session: SessionState,
+    character: Character,
+    target: ResponseTarget,
+    llm: LLMProvider,
+    store: SessionStore,
+    settings: Settings,
+    on_chunk: ChunkCallback | None,
+) -> ConversationMessage:
+    messages = build_conversation_turn_messages(
+        character,
+        draft.dilemma,
+        draft.messages,
+        target,
+        session.user_profile,
+        _agent_profile_for(session, character),
+        _opponent_profile_for(session, character),
+        session.rounds[-3:],
+    )
+    stream = llm.stream(messages, settings.agent_temperature, 550)
+    role = character.value
+    text, latency_ms, usage = await _collect_stream(role, stream, on_chunk)
+    usage = _usage_with_fallback(usage, messages, text)
+    message = ConversationMessage(
+        speaker=_speaker_for(character),
+        content=text,
+        target=target,
+    )
+    draft.messages.append(message)
+    store.save_message(session.session_id, draft.round_number, character.value, text)
+    store.log_model_run(
+        session.session_id,
+        draft.round_number,
+        f"conversation_{character.value}",
+        llm.model,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        latency_ms=latency_ms,
+        was_streamed=True,
+    )
+    return message
+
+
+async def start_conversation_round(
+    session: SessionState,
+    dilemma: str,
+    llm: LLMProvider,
+    store: SessionStore,
+    settings: Settings,
+    *,
+    on_chunk: ChunkCallback | None = None,
+) -> ConversationDraft:
+    round_number = len(session.rounds) + 1
+    draft = ConversationDraft(
+        round_number=round_number,
+        dilemma=dilemma,
+        messages=[
+            ConversationMessage(
+                speaker=ConversationSpeaker.USER,
+                content=dilemma,
+                target=ResponseTarget.BOTH,
+            )
+        ],
+    )
+    store.save_message(session.session_id, round_number, "user", dilemma)
+    for character in _characters_for_target(ResponseTarget.BOTH):
+        await _append_agent_response(
+            draft,
+            session,
+            character,
+            ResponseTarget.BOTH,
+            llm,
+            store,
+            settings,
+            on_chunk,
+        )
+    return draft
+
+
+async def continue_conversation_round(
+    session: SessionState,
+    draft: ConversationDraft,
+    followup: str,
+    target: ResponseTarget,
+    llm: LLMProvider,
+    store: SessionStore,
+    settings: Settings,
+    *,
+    on_chunk: ChunkCallback | None = None,
+) -> ConversationDraft:
+    user_message = ConversationMessage(
+        speaker=ConversationSpeaker.USER,
+        content=followup,
+        target=target,
+    )
+    draft.messages.append(user_message)
+    store.save_message(session.session_id, draft.round_number, "user", followup)
+    for character in _characters_for_target(target):
+        await _append_agent_response(
+            draft,
+            session,
+            character,
+            target,
+            llm,
+            store,
+            settings,
+            on_chunk,
+        )
+    return draft
+
+
+def _round_from_conversation(draft: ConversationDraft, verdict) -> Round:
+    sunny_texts = [
+        message.content
+        for message in draft.messages
+        if message.speaker == ConversationSpeaker.SUNNY
+    ]
+    crowley_texts = [
+        message.content
+        for message in draft.messages
+        if message.speaker == ConversationSpeaker.CROWLEY
+    ]
+    sunny_opening = sunny_texts[0] if sunny_texts else "Sunny did not respond."
+    crowley_opening = crowley_texts[0] if crowley_texts else "Crowley did not respond."
+    sunny_rebuttal = "\n\n".join(sunny_texts[1:]) or sunny_opening
+    crowley_rebuttal = "\n\n".join(crowley_texts[1:]) or crowley_opening
+    return Round(
+        round_number=draft.round_number,
+        dilemma=draft.dilemma,
+        conversation=draft.messages,
+        sunny_opening=Opening(character=Character.SUNNY, argument=sunny_opening),
+        crowley_opening=Opening(character=Character.CROWLEY, argument=crowley_opening),
+        sunny_rebuttal=Rebuttal(character=Character.SUNNY, argument=sunny_rebuttal),
+        crowley_rebuttal=Rebuttal(character=Character.CROWLEY, argument=crowley_rebuttal),
+        verdict=verdict,
+        timestamp=datetime.now(UTC),
+    )
+
+
+async def judge_conversation_round(
+    session: SessionState,
+    draft: ConversationDraft,
+    llm: LLMProvider,
+    store: SessionStore,
+    settings: Settings,
+) -> Round:
+    judge_start = time.perf_counter()
+    verdict = await judge_conversation(
+        draft.dilemma,
+        draft.messages,
+        llm,
+        round_number=draft.round_number,
+        temperature=settings.judge_temperature,
+    )
+    judge_usage = get_attached_usage(verdict)
+    store.log_model_run(
+        session.session_id,
+        draft.round_number,
+        "judge_conversation",
+        llm.model,
+        input_tokens=judge_usage.input_tokens,
+        output_tokens=judge_usage.output_tokens or max(1, len(verdict.model_dump_json()) // 4),
+        latency_ms=int((time.perf_counter() - judge_start) * 1000),
+        was_streamed=False,
+        error="fallback" if verdict.is_fallback else None,
+    )
+    store.save_message(
+        session.session_id,
+        draft.round_number,
+        "judge_verdict",
+        verdict.model_dump_json(),
+    )
+    return _round_from_conversation(draft, verdict)
 
 
 async def run_debate_round(

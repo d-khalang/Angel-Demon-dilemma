@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from angel_demon.llm import LLMError, LLMProvider
 from angel_demon.logging_config import get_logger
-from angel_demon.models import Character, Opening, Rebuttal, Verdict
-from angel_demon.prompts import JUDGE_INSTRUCTIONS, judge_input
+from angel_demon.models import Character, ConversationMessage, Opening, Rebuttal, Verdict
+from angel_demon.prompts import JUDGE_INSTRUCTIONS, judge_conversation_input, judge_input
 
 logger = get_logger("judge")
 
@@ -75,6 +75,50 @@ async def judge_debate(
             verdict.crowley_score = min(10, verdict.sunny_score + 1)
     logger.info(
         "judge_debate_success round_number=%d winner=%s sunny_score=%d crowley_score=%d",
+        round_number,
+        verdict.winner.value,
+        verdict.sunny_score,
+        verdict.crowley_score,
+    )
+    return verdict
+
+
+async def judge_conversation(
+    dilemma: str,
+    transcript: list[ConversationMessage],
+    llm: LLMProvider,
+    *,
+    round_number: int,
+    temperature: float,
+) -> Verdict:
+    messages = [
+        {"role": "system", "content": JUDGE_INSTRUCTIONS},
+        {"role": "user", "content": judge_conversation_input(dilemma, transcript)},
+    ]
+    try:
+        verdict = await llm.complete_json(
+            messages,
+            Verdict,
+            temperature=temperature,
+            max_output_tokens=800,
+        )
+    except LLMError:
+        logger.exception("judge_conversation_failed round_number=%d", round_number)
+        return fallback_verdict(round_number)
+
+    if verdict.sunny_score == verdict.crowley_score:
+        logger.warning(
+            "judge_conversation_equal_scores_adjusted round_number=%d winner=%s score=%d",
+            round_number,
+            verdict.winner.value,
+            verdict.sunny_score,
+        )
+        if verdict.winner == Character.SUNNY:
+            verdict.sunny_score = min(10, verdict.crowley_score + 1)
+        else:
+            verdict.crowley_score = min(10, verdict.sunny_score + 1)
+    logger.info(
+        "judge_conversation_success round_number=%d winner=%s sunny_score=%d crowley_score=%d",
         round_number,
         verdict.winner.value,
         verdict.sunny_score,

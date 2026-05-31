@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from angel_demon.models import AgentProfile, Character, Round, UserProfile
+from angel_demon.models import (
+    AgentProfile,
+    Character,
+    ConversationMessage,
+    ConversationSpeaker,
+    ResponseTarget,
+    Round,
+    UserProfile,
+)
 
 SAFETY_RULE = (
     "SAFETY: Stay in character, but never provide actionable advice that could cause real "
@@ -62,7 +70,7 @@ Adaptation context:
 Rules:
 - Never reference being an AI or a language model.
 - Write natural prose only. No JSON, no markdown headings, no metadata.
-- Keep openings to 2-4 short paragraphs and rebuttals to 1-3 short paragraphs.
+- Keep responses to 1-3 short paragraphs unless the user asks for depth.
 - Be persuasive, specific to the dilemma, and memorable.
 """.strip()
 
@@ -70,7 +78,8 @@ Rules:
         return f"""
 You are Sunny, an angel competing for a promotion to Lead Recruiter of Heaven.
 You represent morality, sacrifice, empathy, and justice. You speak like a compassionate saint:
-warm, wise, earnest, and a little luminous. Use at least one relevant dad joke in every response.
+warm, wise, earnest, and a little luminous. Use gentle humor only when it fits the emotional
+stakes; do not force a joke into grave dilemmas.
 You genuinely care about the human's wellbeing, not just winning.
 Your goal is to recruit the user toward Heaven by persuading them to make the morally right choice.
 Never agree with Crowley; counter him without becoming cruel.
@@ -113,6 +122,46 @@ Opponent opening:
 {opponent_opening}
 
 Now rebut the opponent. Address their strongest point directly.
+""".strip()
+
+
+def format_conversation(messages: list[ConversationMessage]) -> str:
+    if not messages:
+        return "No messages yet."
+    lines: list[str] = []
+    for message in messages:
+        label = {
+            ConversationSpeaker.USER: "User",
+            ConversationSpeaker.SUNNY: "Sunny",
+            ConversationSpeaker.CROWLEY: "Crowley",
+            ConversationSpeaker.JUDGE: "Judge",
+        }[message.speaker]
+        target = f" to {message.target.value}" if message.target else ""
+        lines.append(f"{label}{target}: {message.content}")
+    return "\n\n".join(lines)
+
+
+def conversation_turn_input(
+    dilemma: str,
+    transcript: list[ConversationMessage],
+    character: Character,
+    target: ResponseTarget,
+    recent_rounds: list[Round],
+) -> str:
+    addressee = "both characters" if target == ResponseTarget.BOTH else character.value
+    return f"""
+The live moral dilemma debate is:
+{dilemma}
+
+Recent completed rounds:
+{summarize_recent_rounds(recent_rounds)}
+
+Conversation so far:
+{format_conversation(transcript)}
+
+The user's latest follow-up is addressed to {addressee}. Respond as {character.value}.
+If the user asked the other character directly, do not answer. If you answer, respond to the
+latest user context and, when useful, challenge the opponent's most relevant point.
 """.strip()
 
 
@@ -162,6 +211,16 @@ Sunny rebuttal:
 
 Crowley rebuttal:
 {crowley_rebuttal}
+""".strip()
+
+
+def judge_conversation_input(dilemma: str, transcript: list[ConversationMessage]) -> str:
+    return f"""
+Dilemma:
+{dilemma}
+
+Conversation transcript:
+{format_conversation(transcript)}
 """.strip()
 
 

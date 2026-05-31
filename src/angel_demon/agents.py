@@ -5,8 +5,22 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from angel_demon.llm import LLMProvider, LLMStreamChunk
-from angel_demon.models import AgentProfile, Character, Opening, Rebuttal, Round, UserProfile
-from angel_demon.prompts import character_instructions, opening_input, rebuttal_input
+from angel_demon.models import (
+    AgentProfile,
+    Character,
+    ConversationMessage,
+    Opening,
+    Rebuttal,
+    ResponseTarget,
+    Round,
+    UserProfile,
+)
+from angel_demon.prompts import (
+    character_instructions,
+    conversation_turn_input,
+    opening_input,
+    rebuttal_input,
+)
 
 
 def _opponent(character: Character) -> Character:
@@ -60,6 +74,39 @@ def build_rebuttal_messages(
                 dilemma,
                 own_opening.argument,
                 opponent_opening.argument,
+            ),
+        },
+    ]
+
+
+def build_conversation_turn_messages(
+    character: Character,
+    dilemma: str,
+    transcript: list[ConversationMessage],
+    target: ResponseTarget,
+    user_profile: UserProfile,
+    agent_profile: AgentProfile,
+    opponent_profile: AgentProfile,
+    round_history: list[Round],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": character_instructions(
+                character,
+                user_profile,
+                agent_profile,
+                opponent_profile,
+            ),
+        },
+        {
+            "role": "user",
+            "content": conversation_turn_input(
+                dilemma,
+                transcript,
+                character,
+                target,
+                round_history,
             ),
         },
     ]
