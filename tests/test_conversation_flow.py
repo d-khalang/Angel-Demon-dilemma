@@ -4,6 +4,7 @@ import pytest
 
 from angel_demon.config import Settings
 from angel_demon.flow import (
+    advance_conversation_round,
     continue_conversation_round,
     judge_conversation_round,
     start_conversation_round,
@@ -66,6 +67,40 @@ async def test_conversation_round_supports_targeted_followup(tmp_path) -> None:
         ConversationSpeaker.SUNNY,
     ]
     assert draft.messages[-1].content == "Sunny targeted reply."
+
+
+@pytest.mark.asyncio
+async def test_conversation_round_can_advance_without_user_followup(tmp_path) -> None:
+    store = SessionStore(tmp_path / "state.db")
+    session = store.create_session()
+    llm = MockLLMProvider(
+        [
+            "Sunny opening.",
+            "Crowley opening.",
+            "Sunny continues.",
+            "Crowley continues.",
+        ]
+    )
+
+    draft = await start_conversation_round(
+        session,
+        "Should I tell the painful truth?",
+        llm,
+        store,
+        settings(tmp_path),
+    )
+    draft = await advance_conversation_round(session, draft, llm, store, settings(tmp_path))
+
+    assert [message.speaker for message in draft.messages] == [
+        ConversationSpeaker.USER,
+        ConversationSpeaker.SUNNY,
+        ConversationSpeaker.CROWLEY,
+        ConversationSpeaker.SYSTEM,
+        ConversationSpeaker.SUNNY,
+        ConversationSpeaker.CROWLEY,
+    ]
+    assert draft.messages[-2].content == "Sunny continues."
+    assert draft.messages[-1].content == "Crowley continues."
 
 
 @pytest.mark.asyncio

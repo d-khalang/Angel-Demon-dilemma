@@ -14,6 +14,7 @@ from angel_demon.models import ResponseTarget, UserChoice
 from angel_demon.state import SessionStore
 from angel_demon.ui import session_state as ui_state
 from angel_demon.ui.debate import (
+    advance_chat_round,
     choose_dilemma,
     continue_chat_round,
     judge_chat_round,
@@ -131,8 +132,32 @@ def main() -> None:
                 default="Both",
                 key="reply_target",
             )
-            col_a, col_b = st.columns([1, 2])
-            if col_a.button("Judge current debate", use_container_width=True):
+            st.caption(
+                "Final judgment ends the debate and moves you to the decision step. "
+                "Use Continue debate if you are not convinced yet."
+            )
+            col_a, col_b, col_c = st.columns([1, 1, 2])
+            if col_a.button("Continue debate", use_container_width=True):
+                with st.status("Continuing the debate...", expanded=False):
+                    try:
+                        draft = asyncio.run(
+                            advance_chat_round(session, draft, settings, store, llm)
+                        )
+                    except LLMError as exc:
+                        get_logger("app").exception(
+                            "ui_conversation_advance_failed session_id=%s error=%s",
+                            session.session_id,
+                            exc,
+                        )
+                        st.error(
+                            "The OpenAI request failed before the agents could continue. "
+                            "Check your API key, model access, and project quota, then try again."
+                        )
+                        st.caption(str(exc))
+                        return
+                ui_state.set_current_draft(draft)
+                st.rerun()
+            if col_b.button("Finalize with judge", type="primary", use_container_width=True):
                 with st.status("Judging the debate...", expanded=False):
                     try:
                         round_data = asyncio.run(
@@ -153,7 +178,7 @@ def main() -> None:
                 ui_state.set_current_round(round_data)
                 ui_state.clear_current_draft()
                 st.rerun()
-            col_b.caption("Add context, challenge an agent, or ask one side directly.")
+            col_c.caption("Add context, challenge an agent, or ask one side directly.")
             prompt = st.chat_input("Add a follow-up or question")
         if prompt:
             target = TARGET_LABELS[str(selected_target or "Both")]
@@ -181,6 +206,7 @@ def main() -> None:
     if round_data and not round_data.user_choice:
         render_transcript(round_data)
         render_round(round_data)
+        st.info("This debate has been finalized by the judge. Choose a side to complete the round.")
         st.subheader("Your decision")
         col_a, col_b, col_c = st.columns(3)
         choices = (

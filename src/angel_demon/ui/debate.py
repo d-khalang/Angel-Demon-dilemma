@@ -10,6 +10,7 @@ import streamlit as st
 
 from angel_demon.dilemmas import PRESET_DILEMMAS
 from angel_demon.flow import (
+    advance_conversation_round,
     continue_conversation_round,
     judge_conversation_round,
     start_conversation_round,
@@ -86,6 +87,9 @@ def render_chat_message(speaker: ConversationSpeaker, content: str) -> None:
     if speaker == ConversationSpeaker.USER:
         with st.chat_message("user"):
             st.write(content)
+        return
+    if speaker == ConversationSpeaker.SYSTEM:
+        st.caption(content)
         return
     label = {
         ConversationSpeaker.SUNNY: "Sunny",
@@ -186,6 +190,30 @@ async def continue_chat_round(
         draft,
         followup,
         target,
+        llm,
+        store,
+        settings,
+        on_chunk=on_chunk,
+    )
+
+
+async def advance_chat_round(
+    session: SessionState,
+    draft: ConversationDraft,
+    settings: Any,
+    store: SessionStore,
+    llm: Any,
+) -> ConversationDraft:
+    placeholders = make_stream_placeholders(ResponseTarget.BOTH)
+    buffers = {role: "" for role in placeholders}
+
+    def on_chunk(role: str, chunk: str) -> None:
+        buffers[role] += chunk
+        placeholders[role].markdown(buffers[role])
+
+    return await advance_conversation_round(
+        session,
+        draft,
         llm,
         store,
         settings,

@@ -21,6 +21,7 @@ class UserChoice(StrEnum):
 
 class ConversationSpeaker(StrEnum):
     USER = "user"
+    SYSTEM = "system"
     SUNNY = "sunny"
     CROWLEY = "crowley"
     JUDGE = "judge"

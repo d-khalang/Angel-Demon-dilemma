@@ -132,6 +132,7 @@ def format_conversation(messages: list[ConversationMessage]) -> str:
     for message in messages:
         label = {
             ConversationSpeaker.USER: "User",
+            ConversationSpeaker.SYSTEM: "System",
             ConversationSpeaker.SUNNY: "Sunny",
             ConversationSpeaker.CROWLEY: "Crowley",
             ConversationSpeaker.JUDGE: "Judge",

@@ -232,6 +232,40 @@ async def continue_conversation_round(
     return draft
 
 
+async def advance_conversation_round(
+    session: SessionState,
+    draft: ConversationDraft,
+    llm: LLMProvider,
+    store: SessionStore,
+    settings: Settings,
+    *,
+    on_chunk: ChunkCallback | None = None,
+) -> ConversationDraft:
+    prompt = (
+        "Continue the debate. Sunny and Crowley should each deepen their case, respond to the "
+        "strongest opposing point so far, and avoid repeating earlier arguments."
+    )
+    system_message = ConversationMessage(
+        speaker=ConversationSpeaker.SYSTEM,
+        content=prompt,
+        target=ResponseTarget.BOTH,
+    )
+    draft.messages.append(system_message)
+    store.save_message(session.session_id, draft.round_number, "user", prompt)
+    for character in _characters_for_target(ResponseTarget.BOTH):
+        await _append_agent_response(
+            draft,
+            session,
+            character,
+            ResponseTarget.BOTH,
+            llm,
+            store,
+            settings,
+            on_chunk,
+        )
+    return draft
+
+
 def _round_from_conversation(draft: ConversationDraft, verdict) -> Round:
     sunny_texts = [
         message.content
