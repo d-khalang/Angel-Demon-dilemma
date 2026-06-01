@@ -27,7 +27,7 @@ def render_round_thread(
     llm: Any,
 ) -> None:
     st.subheader(f"Round {round_data.round_number}")
-    render_transcript(round_data)
+    render_transcript(round_data, session.alignment_score)
     render_round(round_data)
 
     if round_data.status == RoundStatus.ACTIVE:

@@ -29,16 +29,31 @@ from angel_demon.state import SessionStore
 AVATAR_DIR = Path("assets/avatars")
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=8)
 def _avatar_bytes(filename: str) -> bytes:
     return (AVATAR_DIR / filename).read_bytes()
 
 
-def avatar_for(speaker: ConversationSpeaker) -> bytes | None:
+def avatar_filename_for(speaker: ConversationSpeaker, alignment_score: int) -> str | None:
     if speaker == ConversationSpeaker.SUNNY:
-        return _avatar_bytes("sunny.png")
+        if alignment_score <= -30:
+            return "sunny-losing.webp"
+        if alignment_score >= 30:
+            return "sunny-winning.webp"
+        return "sunny-neutral.webp"
     if speaker == ConversationSpeaker.CROWLEY:
-        return _avatar_bytes("crowley.png")
+        if alignment_score <= -30:
+            return "crowley-winning.webp"
+        if alignment_score >= 30:
+            return "crowley-losing.webp"
+        return "crowley-neutral.webp"
+    return None
+
+
+def avatar_for(speaker: ConversationSpeaker, alignment_score: int = 0) -> bytes | None:
+    filename = avatar_filename_for(speaker, alignment_score)
+    if filename is not None:
+        return _avatar_bytes(filename)
     return None
 
 
@@ -70,14 +85,14 @@ def render_round(round_data: Round) -> None:
         st.warning("Fallback judging was used for this round.")
 
 
-def render_transcript(round_data: Round) -> None:
+def render_transcript(round_data: Round, alignment_score: int = 0) -> None:
     if round_data.conversation:
-        render_conversation(round_data.conversation)
+        render_conversation(round_data.conversation, alignment_score)
         return
-    render_legacy_transcript(round_data)
+    render_legacy_transcript(round_data, alignment_score)
 
 
-def render_legacy_transcript(round_data: Round) -> None:
+def render_legacy_transcript(round_data: Round, alignment_score: int = 0) -> None:
     legacy_messages = [
         (ConversationSpeaker.SUNNY, round_data.sunny_opening.argument)
         if round_data.sunny_opening
@@ -94,10 +109,15 @@ def render_legacy_transcript(round_data: Round) -> None:
     ]
     for item in legacy_messages:
         if item is not None:
-            render_chat_message(*item)
+            render_chat_message(*item, alignment_score=alignment_score)
 
 
-def render_chat_message(speaker: ConversationSpeaker, content: str) -> None:
+def render_chat_message(
+    speaker: ConversationSpeaker,
+    content: str,
+    *,
+    alignment_score: int = 0,
+) -> None:
     if speaker == ConversationSpeaker.USER:
         with st.chat_message("user"):
             st.write(content)
@@ -110,14 +130,14 @@ def render_chat_message(speaker: ConversationSpeaker, content: str) -> None:
         ConversationSpeaker.CROWLEY: "Crowley",
         ConversationSpeaker.JUDGE: "Judge",
     }[speaker]
-    with st.chat_message(label, avatar=avatar_for(speaker)):
+    with st.chat_message(label, avatar=avatar_for(speaker, alignment_score)):
         st.caption(label)
         st.markdown(content)
 
 
-def render_conversation(messages) -> None:
+def render_conversation(messages, alignment_score: int = 0) -> None:
     for message in messages:
-        render_chat_message(message.speaker, message.content)
+        render_chat_message(message.speaker, message.content, alignment_score=alignment_score)
 
 
 def round_status_label(status: RoundStatus) -> str:
@@ -172,7 +192,7 @@ def _speaker_from_stream_role(role: str) -> ConversationSpeaker:
     return ConversationSpeaker.SYSTEM
 
 
-def make_stream_callback() -> Any:
+def make_stream_callback(alignment_score: int = 0) -> Any:
     placeholders: dict[str, Any] = {}
     buffers: dict[str, str] = {}
 
@@ -180,7 +200,7 @@ def make_stream_callback() -> Any:
         if role not in placeholders:
             speaker = _speaker_from_stream_role(role)
             label = "Sunny" if speaker == ConversationSpeaker.SUNNY else "Crowley"
-            with st.chat_message(label, avatar=avatar_for(speaker)):
+            with st.chat_message(label, avatar=avatar_for(speaker, alignment_score)):
                 st.caption(label)
                 placeholders[role] = st.empty()
             buffers[role] = ""
@@ -203,7 +223,7 @@ async def start_chat_round(
         llm,
         store,
         settings,
-        on_chunk=make_stream_callback(),
+        on_chunk=make_stream_callback(session.alignment_score),
     )
 
 
@@ -224,7 +244,7 @@ async def continue_chat_round(
         llm,
         store,
         settings,
-        on_chunk=make_stream_callback(),
+        on_chunk=make_stream_callback(session.alignment_score),
     )
 
 
@@ -241,7 +261,7 @@ async def advance_chat_round(
         llm,
         store,
         settings,
-        on_chunk=make_stream_callback(),
+        on_chunk=make_stream_callback(session.alignment_score),
     )
 
 

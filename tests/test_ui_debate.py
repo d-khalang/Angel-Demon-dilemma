@@ -1,5 +1,17 @@
-from angel_demon.models import Character, Round, RoundStatus, UserChoice, Verdict
-from angel_demon.ui.debate import primary_action_label, round_history_label
+from angel_demon.models import (
+    Character,
+    ConversationSpeaker,
+    Round,
+    RoundStatus,
+    UserChoice,
+    Verdict,
+)
+from angel_demon.ui.debate import (
+    avatar_filename_for,
+    avatar_for,
+    primary_action_label,
+    round_history_label,
+)
 
 
 def verdict() -> Verdict:
@@ -46,3 +58,20 @@ def test_primary_action_label_follows_round_status() -> None:
     assert primary_action_label(active) == "Continue debate"
     assert primary_action_label(judged) == "Choose your side"
     assert primary_action_label(decided) == "Start next dilemma"
+
+
+def test_avatar_filename_follows_alignment_ranges() -> None:
+    assert avatar_filename_for(ConversationSpeaker.SUNNY, -30) == "sunny-losing.webp"
+    assert avatar_filename_for(ConversationSpeaker.CROWLEY, -30) == "crowley-winning.webp"
+    assert avatar_filename_for(ConversationSpeaker.SUNNY, -29) == "sunny-neutral.webp"
+    assert avatar_filename_for(ConversationSpeaker.CROWLEY, 29) == "crowley-neutral.webp"
+    assert avatar_filename_for(ConversationSpeaker.SUNNY, 30) == "sunny-winning.webp"
+    assert avatar_filename_for(ConversationSpeaker.CROWLEY, 30) == "crowley-losing.webp"
+
+
+def test_avatar_bytes_use_webp_assets() -> None:
+    avatar = avatar_for(ConversationSpeaker.SUNNY, 0)
+
+    assert avatar is not None
+    assert avatar.startswith(b"RIFF")
+    assert b"WEBP" in avatar[:16]
