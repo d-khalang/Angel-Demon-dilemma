@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Character(StrEnum):
@@ -31,6 +31,12 @@ class ResponseTarget(StrEnum):
     BOTH = "both"
     SUNNY = "sunny"
     CROWLEY = "crowley"
+
+
+class RoundStatus(StrEnum):
+    ACTIVE = "active"
+    JUDGED = "judged"
+    DECIDED = "decided"
 
 
 class AlignmentZone(StrEnum):
@@ -73,22 +79,24 @@ class Verdict(BaseModel):
 class Round(BaseModel):
     round_number: int
     dilemma: str
+    status: RoundStatus = RoundStatus.ACTIVE
     conversation: list[ConversationMessage] = Field(default_factory=list)
-    sunny_opening: Opening
-    crowley_opening: Opening
-    sunny_rebuttal: Rebuttal
-    crowley_rebuttal: Rebuttal
-    verdict: Verdict
+    sunny_opening: Opening | None = None
+    crowley_opening: Opening | None = None
+    sunny_rebuttal: Rebuttal | None = None
+    crowley_rebuttal: Rebuttal | None = None
+    verdict: Verdict | None = None
     user_choice: UserChoice | None = None
     alignment_delta: int = 0
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-
-class ConversationDraft(BaseModel):
-    round_number: int
-    dilemma: str
-    messages: list[ConversationMessage] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    @model_validator(mode="after")
+    def infer_status_from_existing_data(self) -> Round:
+        if self.user_choice is not None:
+            self.status = RoundStatus.DECIDED
+        elif self.verdict is not None and self.status == RoundStatus.ACTIVE:
+            self.status = RoundStatus.JUDGED
+        return self
 
 
 class UserProfile(BaseModel):

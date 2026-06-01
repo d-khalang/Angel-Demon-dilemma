@@ -3,9 +3,13 @@ from datetime import UTC, datetime
 from angel_demon.models import (
     AgentProfile,
     Character,
+    ConversationMessage,
+    ConversationSpeaker,
     Opening,
     Rebuttal,
     Round,
+    RoundStatus,
+    UserChoice,
     UserProfile,
     Verdict,
 )
@@ -64,6 +68,52 @@ def test_session_round_trip(tmp_path) -> None:
     assert loaded.session_id == session.session_id
     assert loaded.alignment_score == -3
     assert loaded.rounds[0].verdict.winner == Character.CROWLEY
+
+
+def test_round_statuses_and_full_transcripts_are_persisted(tmp_path) -> None:
+    store = SessionStore(tmp_path / "state.db")
+    session = store.create_session()
+    active_round = Round(
+        round_number=1,
+        dilemma="Tell the truth?",
+        status=RoundStatus.ACTIVE,
+        conversation=[
+            ConversationMessage(
+                speaker=ConversationSpeaker.USER,
+                content="Tell the truth?",
+            ),
+            ConversationMessage(
+                speaker=ConversationSpeaker.SUNNY,
+                content="Truth heals.",
+            ),
+        ],
+    )
+
+    store.save_round(session.session_id, active_round)
+    loaded = store.load_session(session.session_id)
+
+    assert loaded is not None
+    assert loaded.rounds[0].status == RoundStatus.ACTIVE
+    assert loaded.rounds[0].verdict is None
+    assert loaded.rounds[0].conversation[1].content == "Truth heals."
+
+    active_round.verdict = sample_round().verdict
+    active_round.status = RoundStatus.JUDGED
+    store.save_round(session.session_id, active_round)
+    loaded = store.load_session(session.session_id)
+
+    assert loaded is not None
+    assert loaded.rounds[0].status == RoundStatus.JUDGED
+    assert loaded.rounds[0].verdict is not None
+
+    active_round.user_choice = UserChoice.FOLLOW_SUNNY
+    active_round.status = RoundStatus.DECIDED
+    store.save_round(session.session_id, active_round)
+    loaded = store.load_session(session.session_id)
+
+    assert loaded is not None
+    assert loaded.rounds[0].status == RoundStatus.DECIDED
+    assert loaded.rounds[0].user_choice == UserChoice.FOLLOW_SUNNY
 
 
 def test_messages_and_model_runs_are_recorded(tmp_path) -> None:

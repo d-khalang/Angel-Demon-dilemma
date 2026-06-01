@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import streamlit as st
 
 from angel_demon.logging_config import get_logger
 from angel_demon.models import Character, SessionState, User
-from angel_demon.scoring import get_promotion_leader
+from angel_demon.scoring import (
+    calculate_conversion_streak,
+    calculate_judge_laurels,
+    get_promotion_leader,
+)
 from angel_demon.state import DEFAULT_USER_NAME, SessionStore
 from angel_demon.ui import session_state as ui_state
-from angel_demon.ui.debate import alignment_label
+from angel_demon.ui.debate import alignment_label, round_history_label
 
 logger = get_logger("ui.sidebar")
 
@@ -52,7 +58,8 @@ def _render_user_controls(active_user: User, session: SessionState, store: Sessi
             if claimed_session:
                 ui_state.set_session_id(claimed_session.session_id)
         ui_state.set_user_id(user.user_id)
-        ui_state.clear_current_round()
+        ui_state.clear_selected_round_number()
+        ui_state.stop_composing_new_round()
         logger.info("ui_user_created user_id=%s", user.user_id)
         st.rerun()
 
@@ -102,7 +109,8 @@ def _render_delete_controls(active_user: User, session: SessionState, store: Ses
         ):
             store.delete_session(session.session_id)
             ui_state.clear_session_id()
-            ui_state.clear_current_round()
+            ui_state.clear_selected_round_number()
+            ui_state.stop_composing_new_round()
             logger.info(
                 "ui_session_deleted user_id=%s session_id=%s",
                 active_user.user_id,
@@ -129,9 +137,18 @@ def _render_score_controls(session: SessionState) -> None:
         "Tied" if leader is None else ("Sunny" if leader == Character.SUNNY else "Crowley")
     )
     col_a, col_b = st.columns(2)
-    col_a.metric("Sunny", session.sunny_profile.wins)
-    col_b.metric("Crowley", session.crowley_profile.wins)
-    st.caption(f"Leader: {leader_text}")
+    col_a.metric("Sunny souls", session.sunny_profile.wins)
+    col_b.metric("Crowley souls", session.crowley_profile.wins)
+    st.caption(f"Lead Realm Recruiter: {leader_text}")
+
+    sunny_laurels, crowley_laurels = calculate_judge_laurels(session.rounds)
+    streak_owner, streak = calculate_conversion_streak(session.rounds)
+    col_c, col_d = st.columns(2)
+    col_c.metric("Sunny laurels", sunny_laurels)
+    col_d.metric("Crowley laurels", crowley_laurels)
+    if streak_owner is not None and streak:
+        name = "Sunny" if streak_owner == Character.SUNNY else "Crowley"
+        st.caption(f"Conversion streak: {name} x{streak}")
 
     st.divider()
     st.title("Alignment")
@@ -144,13 +161,28 @@ def _render_history(session: SessionState) -> None:
     st.title("History")
     if not session.rounds:
         st.caption("No rounds yet.")
+        return
+    selected_round = ui_state.get_selected_round_number()
     for round_data in reversed(session.rounds[-8:]):
-        label = f"Round {round_data.round_number}: {round_data.verdict.winner.value} won"
-        with st.expander(label):
-            st.write(round_data.dilemma)
-            if round_data.user_choice:
-                st.caption(f"User chose: {round_data.user_choice.value}")
-            st.caption(round_data.verdict.reason)
+        label = round_history_label(round_data)
+        button_type: Literal["primary", "secondary"] = (
+            "primary" if round_data.round_number == selected_round else "secondary"
+        )
+        if st.button(
+            label,
+            key=f"history_round_{round_data.round_number}",
+            type=button_type,
+            use_container_width=True,
+        ):
+            ui_state.set_selected_round_number(round_data.round_number)
+            logger.info("ui_history_round_selected round_number=%d", round_data.round_number)
+            st.rerun()
+        if round_data.verdict:
+            winner = "Sunny" if round_data.verdict.winner == Character.SUNNY else "Crowley"
+            choice = round_data.user_choice.value if round_data.user_choice else "not chosen"
+            st.caption(f"Judge: {winner} | Choice: {choice}")
+        else:
+            st.caption("No verdict yet")
 
 
 def render_sidebar(active_user: User, session: SessionState, store: SessionStore) -> None:

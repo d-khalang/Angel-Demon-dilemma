@@ -14,7 +14,7 @@ from angel_demon.models import AgentProfile, Character, Round, SessionState, Use
 
 logger = get_logger("state")
 DEFAULT_USER_NAME = "Anonymous Player"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _now_iso() -> str:
@@ -128,7 +128,7 @@ class SessionStore:
             CREATE INDEX IF NOT EXISTS idx_rounds_session ON rounds(session_id);
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
             CREATE INDEX IF NOT EXISTS idx_model_runs_session ON model_runs(session_id);
-            PRAGMA user_version = 2;
+            PRAGMA user_version = 3;
             """
         )
 

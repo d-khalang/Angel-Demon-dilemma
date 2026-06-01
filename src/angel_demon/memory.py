@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from angel_demon.llm import LLMError, LLMProvider, attach_usage, get_attached_usage
 from angel_demon.logging_config import get_logger
 from angel_demon.models import (
@@ -29,6 +31,44 @@ def _dedupe(values: list[str], limit: int = 8) -> list[str]:
     return result[:limit]
 
 
+def _truncate(value: str, limit: int = 600) -> str:
+    value = " ".join(value.split())
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 3]}..."
+
+
+def _memory_round_payload(round_result: Round) -> str:
+    verdict = round_result.verdict
+    payload = {
+        "round_number": round_result.round_number,
+        "dilemma": round_result.dilemma,
+        "status": round_result.status.value,
+        "user_choice": round_result.user_choice.value if round_result.user_choice else None,
+        "alignment_delta": round_result.alignment_delta,
+        "verdict": None
+        if verdict is None
+        else {
+            "winner": verdict.winner.value,
+            "reason": verdict.reason,
+            "sunny_score": verdict.sunny_score,
+            "crowley_score": verdict.crowley_score,
+            "persuasion_tactics_sunny": verdict.persuasion_tactics_sunny,
+            "persuasion_tactics_crowley": verdict.persuasion_tactics_crowley,
+            "key_moment": verdict.key_moment,
+        },
+        "transcript_excerpt": [
+            {
+                "speaker": message.speaker.value,
+                "target": getattr(message.target, "value", message.target),
+                "content": _truncate(message.content),
+            }
+            for message in round_result.conversation[-8:]
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
 async def update_user_profile(
     profile: UserProfile,
     round_result: Round,
@@ -42,7 +82,7 @@ async def update_user_profile(
             "role": "user",
             "content": (
                 f"Current profile JSON:\n{profile.model_dump_json()}\n\n"
-                f"Latest round JSON:\n{round_result.model_dump_json()}\n\n"
+                f"Latest round summary JSON:\n{_memory_round_payload(round_result)}\n\n"
                 "Return the updated user profile fields."
             ),
         },
@@ -90,6 +130,9 @@ async def update_agent_profile(
     *,
     temperature: float,
 ) -> AgentProfile:
+    if round_result.verdict is None:
+        raise ValueError("Cannot update agent memory before a round has a verdict.")
+
     own_tactics = (
         round_result.verdict.persuasion_tactics_sunny
         if profile.character == Character.SUNNY
@@ -107,7 +150,7 @@ async def update_agent_profile(
             "content": (
                 f"Current profile JSON:\n{profile.model_dump_json()}\n\n"
                 f"User profile JSON:\n{user_profile.model_dump_json()}\n\n"
-                f"Round JSON:\n{round_result.model_dump_json()}\n\n"
+                f"Round summary JSON:\n{_memory_round_payload(round_result)}\n\n"
                 f"Own tactics: {own_tactics}\nOpponent tactics: {opponent_tactics}\n"
                 "Return the updated agent profile fields."
             ),
@@ -169,6 +212,9 @@ def _heuristic_user_update(profile: UserProfile, round_result: Round) -> UserPro
 
 
 def _heuristic_agent_update(profile: AgentProfile, round_result: Round) -> AgentProfileUpdate:
+    if round_result.verdict is None:
+        raise ValueError("Cannot update agent memory before a round has a verdict.")
+
     won = (
         round_result.user_choice == UserChoice.FOLLOW_SUNNY
         if profile.character == Character.SUNNY

@@ -17,10 +17,10 @@ from angel_demon.flow import (
 )
 from angel_demon.models import (
     Character,
-    ConversationDraft,
     ConversationSpeaker,
     ResponseTarget,
     Round,
+    RoundStatus,
     SessionState,
 )
 from angel_demon.scoring import get_alignment_zone
@@ -54,6 +54,10 @@ def alignment_label(score: int) -> str:
 
 
 def render_round(round_data: Round) -> None:
+    if round_data.verdict is None:
+        st.subheader(f"Round {round_data.round_number}")
+        st.caption("This debate has not been judged yet.")
+        return
     st.subheader(f"Round {round_data.round_number} Verdict")
     winner = "Sunny" if round_data.verdict.winner == Character.SUNNY else "Crowley"
     st.markdown(f"**Winner:** {winner}")
@@ -74,13 +78,23 @@ def render_transcript(round_data: Round) -> None:
 
 
 def render_legacy_transcript(round_data: Round) -> None:
-    for speaker, content in (
-        (ConversationSpeaker.SUNNY, round_data.sunny_opening.argument),
-        (ConversationSpeaker.CROWLEY, round_data.crowley_opening.argument),
-        (ConversationSpeaker.SUNNY, round_data.sunny_rebuttal.argument),
-        (ConversationSpeaker.CROWLEY, round_data.crowley_rebuttal.argument),
-    ):
-        render_chat_message(speaker, content)
+    legacy_messages = [
+        (ConversationSpeaker.SUNNY, round_data.sunny_opening.argument)
+        if round_data.sunny_opening
+        else None,
+        (ConversationSpeaker.CROWLEY, round_data.crowley_opening.argument)
+        if round_data.crowley_opening
+        else None,
+        (ConversationSpeaker.SUNNY, round_data.sunny_rebuttal.argument)
+        if round_data.sunny_rebuttal
+        else None,
+        (ConversationSpeaker.CROWLEY, round_data.crowley_rebuttal.argument)
+        if round_data.crowley_rebuttal
+        else None,
+    ]
+    for item in legacy_messages:
+        if item is not None:
+            render_chat_message(*item)
 
 
 def render_chat_message(speaker: ConversationSpeaker, content: str) -> None:
@@ -98,12 +112,35 @@ def render_chat_message(speaker: ConversationSpeaker, content: str) -> None:
     }[speaker]
     with st.chat_message(label, avatar=avatar_for(speaker)):
         st.caption(label)
-        st.write(content)
+        st.markdown(content)
 
 
 def render_conversation(messages) -> None:
     for message in messages:
         render_chat_message(message.speaker, message.content)
+
+
+def round_status_label(status: RoundStatus) -> str:
+    return {
+        RoundStatus.ACTIVE: "Active",
+        RoundStatus.JUDGED: "Judged",
+        RoundStatus.DECIDED: "Decided",
+    }[status]
+
+
+def round_history_label(round_data: Round) -> str:
+    preview = " ".join(round_data.dilemma.split())
+    if len(preview) > 42:
+        preview = f"{preview[:39]}..."
+    return f"R{round_data.round_number} | {round_status_label(round_data.status)} | {preview}"
+
+
+def primary_action_label(round_data: Round) -> str:
+    if round_data.status == RoundStatus.ACTIVE:
+        return "Continue debate"
+    if round_data.status == RoundStatus.JUDGED:
+        return "Choose your side"
+    return "Start next dilemma"
 
 
 def choose_dilemma() -> tuple[str, bool]:
@@ -126,23 +163,31 @@ def choose_dilemma() -> tuple[str, bool]:
     return dilemma, submitted
 
 
-def make_stream_placeholders(target: ResponseTarget) -> dict[str, Any]:
+def _speaker_from_stream_role(role: str) -> ConversationSpeaker:
+    speaker_value = role.split(":", maxsplit=1)[0]
+    if speaker_value == "sunny":
+        return ConversationSpeaker.SUNNY
+    if speaker_value == "crowley":
+        return ConversationSpeaker.CROWLEY
+    return ConversationSpeaker.SYSTEM
+
+
+def make_stream_callback() -> Any:
     placeholders: dict[str, Any] = {}
-    speakers = []
-    if target in {ResponseTarget.BOTH, ResponseTarget.SUNNY}:
-        speakers.append((ConversationSpeaker.SUNNY, "sunny"))
-    if target in {ResponseTarget.BOTH, ResponseTarget.CROWLEY}:
-        speakers.append((ConversationSpeaker.CROWLEY, "crowley"))
-    for speaker, key in speakers:
-        if speaker == ConversationSpeaker.SUNNY:
-            with st.chat_message("Sunny", avatar=avatar_for(speaker)):
-                st.caption("Sunny")
-                placeholders[key] = st.empty()
-        else:
-            with st.chat_message("Crowley", avatar=avatar_for(speaker)):
-                st.caption("Crowley")
-                placeholders[key] = st.empty()
-    return placeholders
+    buffers: dict[str, str] = {}
+
+    def on_chunk(role: str, chunk: str) -> None:
+        if role not in placeholders:
+            speaker = _speaker_from_stream_role(role)
+            label = "Sunny" if speaker == ConversationSpeaker.SUNNY else "Crowley"
+            with st.chat_message(label, avatar=avatar_for(speaker)):
+                st.caption(label)
+                placeholders[role] = st.empty()
+            buffers[role] = ""
+        buffers[role] += chunk
+        placeholders[role].markdown(buffers[role])
+
+    return on_chunk
 
 
 async def start_chat_round(
@@ -151,81 +196,60 @@ async def start_chat_round(
     settings: Any,
     store: SessionStore,
     llm: Any,
-) -> ConversationDraft:
-    placeholders = make_stream_placeholders(ResponseTarget.BOTH)
-    buffers = {role: "" for role in placeholders}
-
-    def on_chunk(role: str, chunk: str) -> None:
-        buffers[role] += chunk
-        placeholders[role].markdown(buffers[role])
-
+) -> Round:
     return await start_conversation_round(
         session,
         dilemma,
         llm,
         store,
         settings,
-        on_chunk=on_chunk,
+        on_chunk=make_stream_callback(),
     )
 
 
 async def continue_chat_round(
     session: SessionState,
-    draft: ConversationDraft,
+    round_data: Round,
     followup: str,
     target: ResponseTarget,
     settings: Any,
     store: SessionStore,
     llm: Any,
-) -> ConversationDraft:
-    placeholders = make_stream_placeholders(target)
-    buffers = {role: "" for role in placeholders}
-
-    def on_chunk(role: str, chunk: str) -> None:
-        buffers[role] += chunk
-        placeholders[role].markdown(buffers[role])
-
+) -> Round:
     return await continue_conversation_round(
         session,
-        draft,
+        round_data,
         followup,
         target,
         llm,
         store,
         settings,
-        on_chunk=on_chunk,
+        on_chunk=make_stream_callback(),
     )
 
 
 async def advance_chat_round(
     session: SessionState,
-    draft: ConversationDraft,
+    round_data: Round,
     settings: Any,
     store: SessionStore,
     llm: Any,
-) -> ConversationDraft:
-    placeholders = make_stream_placeholders(ResponseTarget.BOTH)
-    buffers = {role: "" for role in placeholders}
-
-    def on_chunk(role: str, chunk: str) -> None:
-        buffers[role] += chunk
-        placeholders[role].markdown(buffers[role])
-
+) -> Round:
     return await advance_conversation_round(
         session,
-        draft,
+        round_data,
         llm,
         store,
         settings,
-        on_chunk=on_chunk,
+        on_chunk=make_stream_callback(),
     )
 
 
 async def judge_chat_round(
     session: SessionState,
-    draft: ConversationDraft,
+    round_data: Round,
     settings: Any,
     store: SessionStore,
     llm: Any,
 ) -> Round:
-    return await judge_conversation_round(session, draft, llm, store, settings)
+    return await judge_conversation_round(session, round_data, llm, store, settings)

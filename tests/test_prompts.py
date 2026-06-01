@@ -49,3 +49,20 @@ def test_prompt_inputs_require_concrete_sides_and_direct_clash() -> None:
     assert "Do not hedge toward the opponent's answer" in opening
     assert "live clash" in rebuttal
     assert "Keep the rivalry alive" in turn
+
+
+def test_character_prompts_allow_optional_markdown_and_questions() -> None:
+    prompt = character_instructions(
+        Character.CROWLEY,
+        UserProfile(),
+        AgentProfile(character=Character.CROWLEY),
+        AgentProfile(character=Character.SUNNY),
+    )
+
+    assert "light Markdown emphasis" in prompt
+    assert "Decide for yourself when to use it" in prompt
+    assert "do not default" in prompt
+    assert "bullets, headings, tables" in prompt
+    assert "pointed question" in prompt
+    assert "opponent currently has more pull" in prompt
+    assert "Use questions sparingly" in prompt
