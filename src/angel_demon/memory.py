@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+from pydantic import ValidationError
+
 from angel_demon.llm import LLMError, LLMProvider, attach_usage, get_attached_usage
 from angel_demon.logging_config import get_logger
 from angel_demon.models import (
@@ -94,24 +96,34 @@ async def update_user_profile(
             temperature=temperature,
             max_output_tokens=500,
         )
-    except LLMError:
+        updated = UserProfile(
+            inferred_values=_dedupe(update.inferred_values),
+            decision_history=[
+                *profile.decision_history,
+                round_result.user_choice or UserChoice.UNDECIDED,
+            ],
+            vulnerability_to_sunny=update.vulnerability_to_sunny,
+            vulnerability_to_crowley=update.vulnerability_to_crowley,
+            recent_themes=_dedupe(update.recent_themes, limit=5),
+            notes=update.notes,
+        )
+    except (LLMError, ValidationError):
         logger.exception(
             "user_profile_update_failed_using_heuristic round_number=%d",
             round_result.round_number,
         )
         update = _heuristic_user_update(profile, round_result)
-
-    updated = UserProfile(
-        inferred_values=_dedupe(update.inferred_values),
-        decision_history=[
-            *profile.decision_history,
-            round_result.user_choice or UserChoice.UNDECIDED,
-        ],
-        vulnerability_to_sunny=update.vulnerability_to_sunny,
-        vulnerability_to_crowley=update.vulnerability_to_crowley,
-        recent_themes=_dedupe(update.recent_themes, limit=5),
-        notes=update.notes,
-    )
+        updated = UserProfile(
+            inferred_values=_dedupe(update.inferred_values),
+            decision_history=[
+                *profile.decision_history,
+                round_result.user_choice or UserChoice.UNDECIDED,
+            ],
+            vulnerability_to_sunny=update.vulnerability_to_sunny,
+            vulnerability_to_crowley=update.vulnerability_to_crowley,
+            recent_themes=_dedupe(update.recent_themes, limit=5),
+            notes=update.notes,
+        )
     updated = attach_usage(updated, get_attached_usage(update))
     logger.info(
         "user_profile_updated round_number=%d values=%d recent_themes=%d",
