@@ -265,27 +265,25 @@ async def test_choice_and_revote_recalculate_session_totals(tmp_path) -> None:
             """,
             """
             {
-              "inferred_values": ["honesty"],
-              "vulnerability_to_sunny": 1.0,
-              "vulnerability_to_crowley": 0.0,
-              "recent_themes": ["truth"],
-              "notes": "Values honesty."
-            }
-            """,
-            """
-            {
-              "successful_tactics": ["empathy"],
-              "failed_tactics": [],
-              "opponent_winning_tactics": [],
-              "adaptation_notes": "Use empathy."
-            }
-            """,
-            """
-            {
-              "successful_tactics": [],
-              "failed_tactics": ["pragmatism"],
-              "opponent_winning_tactics": ["empathy"],
-              "adaptation_notes": "Counter empathy."
+              "user_update": {
+                "inferred_values": ["honesty"],
+                "vulnerability_to_sunny": 1.0,
+                "vulnerability_to_crowley": 0.0,
+                "recent_themes": ["truth"],
+                "notes": "Values honesty."
+              },
+              "sunny_update": {
+                "successful_tactics": ["empathy"],
+                "failed_tactics": [],
+                "opponent_winning_tactics": [],
+                "adaptation_notes": "Use empathy."
+              },
+              "crowley_update": {
+                "successful_tactics": [],
+                "failed_tactics": ["pragmatism"],
+                "opponent_winning_tactics": ["empathy"],
+                "adaptation_notes": "Counter empathy."
+              }
             }
             """,
         ]
@@ -309,6 +307,7 @@ async def test_choice_and_revote_recalculate_session_totals(tmp_path) -> None:
     )
 
     assert session.alignment_score == 18
+    assert session.user_profile.decision_history == [UserChoice.FOLLOW_SUNNY]
     assert session.sunny_profile.wins == 1
     assert session.crowley_profile.wins == 0
 
