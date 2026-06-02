@@ -134,7 +134,8 @@ def _render_session_controls(active_user: User, session: SessionState, store: Se
             index=session_ids.index(session.session_id),
         )
         if delete_col.button(
-            "Delete",
+            "-",
+            key="delete-session-button",
             help="Delete current session",
             use_container_width=True,
         ):
