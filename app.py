@@ -8,11 +8,12 @@ from angel_demon.config import load_settings
 from angel_demon.llm import LLMConfigurationError, create_llm_provider
 from angel_demon.logging_config import get_logger, setup_logging
 from angel_demon.state import SessionStore
-from angel_demon.ui.dynamic_theme import inject_dynamic_theme
+from angel_demon.ui.realm_art import inject_realm_art
 from angel_demon.ui.round_actions import selected_round, start_round
 from angel_demon.ui.round_view import render_round_thread
 from angel_demon.ui.session_controller import get_active_session, get_active_user
 from angel_demon.ui.sidebar import render_sidebar
+from angel_demon.ui.theme import inject_theme_mode
 
 st.set_page_config(
     page_title="Angel vs Demon - Moral Dilemma Debate",
@@ -49,9 +50,8 @@ def get_resources():
 
 
 def main() -> None:
+    inject_theme_mode()
     load_css()
-    st.title("Angel vs Demon")
-    st.caption("Sunny and Crowley compete for your soul, one dilemma at a time.")
 
     try:
         settings, store, llm = get_resources()
@@ -62,7 +62,9 @@ def main() -> None:
 
     active_user = get_active_user(store)
     session = get_active_session(store, active_user.user_id)
-    inject_dynamic_theme(session.alignment_score)
+    inject_realm_art(session.alignment_score)
+    st.title("Angel vs Demon")
+    st.caption("Sunny and Crowley compete for your soul, one dilemma at a time.")
     render_sidebar(active_user, session, store)
     round_data = selected_round(session.rounds)
 

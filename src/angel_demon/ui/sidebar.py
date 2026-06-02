@@ -17,7 +17,7 @@ from angel_demon.scoring import (
 from angel_demon.state import DEFAULT_USER_NAME, SessionStore
 from angel_demon.ui import session_state as ui_state
 from angel_demon.ui.debate import alignment_label
-from angel_demon.ui.dynamic_theme import moral_icon, moral_nickname
+from angel_demon.ui.realm_art import moral_icon, moral_nickname
 
 logger = get_logger("ui.sidebar")
 
@@ -112,7 +112,7 @@ def _confirm_delete_session_dialog(
 def _render_session_controls(active_user: User, session: SessionState, store: SessionStore) -> None:
     header_col, action_col = st.columns([0.78, 0.22], vertical_alignment="center")
     header_col.markdown("### Sessions")
-    if action_col.button("➕", help="Start a new session", use_container_width=True):
+    if action_col.button("+", help="Start a new session", use_container_width=True):
         new_session = store.create_session(active_user.user_id)
         ui_state.switch_session(new_session.session_id)
         logger.info(
@@ -135,7 +135,7 @@ def _render_session_controls(active_user: User, session: SessionState, store: Se
             index=session_ids.index(session.session_id),
         )
         if delete_col.button(
-            "🗑️",
+            "Delete",
             help="Delete current session",
             use_container_width=True,
         ):
@@ -153,7 +153,6 @@ def _render_session_controls(active_user: User, session: SessionState, store: Se
 
 
 def _render_alignment_controls(session: SessionState) -> None:
-    st.title("Alignment")
     score = max(-100, min(100, session.alignment_score))
     thumb_position = (score + 100) / 2
     nickname = escape(moral_nickname(score))
@@ -165,7 +164,6 @@ def _render_alignment_controls(session: SessionState) -> None:
           <div class="ad-alignment-top">
             <div>
               <div class="ad-alignment-name">{icon} {nickname}</div>
-              <div>{label}</div>
             </div>
             <div class="ad-alignment-score">{score:+d}</div>
           </div>
@@ -173,9 +171,9 @@ def _render_alignment_controls(session: SessionState) -> None:
             <div class="ad-alignment-thumb" style="left: {thumb_position:.1f}%"></div>
           </div>
           <div class="ad-alignment-ends">
-            <span>🔥 Hell</span>
-            <span>⚖️ Mortal</span>
-            <span>👼 Heaven</span>
+            <span>Hell</span>
+            <span>Mortal</span>
+            <span>Heaven</span>
           </div>
         </div>
         """,
@@ -216,8 +214,8 @@ def _winner_badge(round_data: Round) -> str:
     if round_data.verdict is None:
         return "Awaiting judgment"
     if round_data.verdict.winner == Character.SUNNY:
-        return "👼 Sunny"
-    return "😈 Crowley"
+        return f"{moral_icon(21)} Sunny"
+    return f"{moral_icon(-21)} Crowley"
 
 
 def _prompt_preview(round_data: Round) -> str:
@@ -275,3 +273,4 @@ def render_sidebar(active_user: User, session: SessionState, store: SessionStore
         _render_session_controls(active_user, session, store)
         st.divider()
         _render_history(session)
+
