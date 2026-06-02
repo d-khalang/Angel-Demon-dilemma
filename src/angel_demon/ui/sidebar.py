@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from html import escape
 from typing import Literal
 
 import streamlit as st
 
 from angel_demon.logging_config import get_logger
-from angel_demon.models import Character, SessionState, User
+from angel_demon.models import Character, Round, RoundStatus, SessionState, User
 from angel_demon.scoring import (
     calculate_conversion_streak,
     calculate_judge_laurels,
@@ -15,7 +16,8 @@ from angel_demon.scoring import (
 )
 from angel_demon.state import DEFAULT_USER_NAME, SessionStore
 from angel_demon.ui import session_state as ui_state
-from angel_demon.ui.debate import alignment_label, round_history_label
+from angel_demon.ui.debate import alignment_label
+from angel_demon.ui.dynamic_theme import moral_icon, moral_nickname
 
 logger = get_logger("ui.sidebar")
 
@@ -28,7 +30,7 @@ def _session_label(row: dict[str, object]) -> str:
 
 
 def _render_user_controls(active_user: User, session: SessionState, store: SessionStore) -> None:
-    st.title("Users")
+    st.title("User")
     all_users = store.list_users()
     named_users = [user for user in all_users if user.display_name != DEFAULT_USER_NAME]
     users = named_users or all_users
@@ -63,13 +65,68 @@ def _render_user_controls(active_user: User, session: SessionState, store: Sessi
         logger.info("ui_user_created user_id=%s", user.user_id)
         st.rerun()
 
+    with st.expander("Delete active user", expanded=False):
+        confirm_user = st.checkbox("Confirm user deletion")
+        if st.button(
+            "Delete user",
+            use_container_width=True,
+            disabled=not confirm_user,
+        ):
+            store.delete_user(active_user.user_id)
+            ui_state.clear_active_context()
+            logger.info("ui_user_deleted user_id=%s", active_user.user_id)
+            st.rerun()
+
+
+def _clear_deleted_session_context() -> None:
+    ui_state.clear_session_id()
+    ui_state.clear_selected_round_number()
+    ui_state.stop_composing_new_round()
+    ui_state.clear_pending_memory_round()
+    ui_state.clear_current_round()
+    ui_state.clear_current_draft()
+
+
+@st.dialog("Delete current session?")
+def _confirm_delete_session_dialog(
+    active_user: User,
+    session: SessionState,
+    store: SessionStore,
+) -> None:
+    st.write("This removes the current debate session and its round history.")
+    st.caption(f"Session: {session.session_id}")
+    col_cancel, col_delete = st.columns(2)
+    if col_cancel.button("Cancel", use_container_width=True):
+        st.rerun()
+    if col_delete.button("Delete", type="primary", use_container_width=True):
+        store.delete_session(session.session_id)
+        _clear_deleted_session_context()
+        logger.info(
+            "ui_session_deleted user_id=%s session_id=%s",
+            active_user.user_id,
+            session.session_id,
+        )
+        st.rerun()
+
 
 def _render_session_controls(active_user: User, session: SessionState, store: SessionStore) -> None:
-    st.title("Sessions")
+    header_col, action_col = st.columns([0.78, 0.22], vertical_alignment="center")
+    header_col.markdown("### Sessions")
+    if action_col.button("➕", help="Start a new session", use_container_width=True):
+        new_session = store.create_session(active_user.user_id)
+        ui_state.switch_session(new_session.session_id)
+        logger.info(
+            "ui_session_created user_id=%s session_id=%s",
+            active_user.user_id,
+            new_session.session_id,
+        )
+        st.rerun()
+
     session_rows = store.list_sessions(active_user.user_id)
     if session_rows:
         session_ids = [str(row["session_id"]) for row in session_rows]
-        selected_session_id = st.selectbox(
+        select_col, delete_col = st.columns([0.82, 0.18], vertical_alignment="bottom")
+        selected_session_id = select_col.selectbox(
             "Active session",
             options=session_ids,
             format_func=lambda value: _session_label(
@@ -77,6 +134,12 @@ def _render_session_controls(active_user: User, session: SessionState, store: Se
             ),
             index=session_ids.index(session.session_id),
         )
+        if delete_col.button(
+            "🗑️",
+            help="Delete current session",
+            use_container_width=True,
+        ):
+            _confirm_delete_session_dialog(active_user, session, store)
         if selected_session_id != session.session_id:
             ui_state.switch_session(selected_session_id)
             logger.info(
@@ -88,46 +151,36 @@ def _render_session_controls(active_user: User, session: SessionState, store: Se
     else:
         st.caption("No sessions yet.")
 
-    if st.button("Start new session", use_container_width=True):
-        new_session = store.create_session(active_user.user_id)
-        ui_state.switch_session(new_session.session_id)
-        logger.info(
-            "ui_session_created user_id=%s session_id=%s",
-            active_user.user_id,
-            new_session.session_id,
-        )
-        st.rerun()
 
-
-def _render_delete_controls(active_user: User, session: SessionState, store: SessionStore) -> None:
-    with st.expander("Delete", expanded=False):
-        confirm_session = st.checkbox("Confirm current session deletion")
-        if st.button(
-            "Delete current session",
-            use_container_width=True,
-            disabled=not confirm_session,
-        ):
-            store.delete_session(session.session_id)
-            ui_state.clear_session_id()
-            ui_state.clear_selected_round_number()
-            ui_state.stop_composing_new_round()
-            logger.info(
-                "ui_session_deleted user_id=%s session_id=%s",
-                active_user.user_id,
-                session.session_id,
-            )
-            st.rerun()
-
-        confirm_user = st.checkbox("Confirm active user deletion")
-        if st.button(
-            "Delete active user",
-            use_container_width=True,
-            disabled=not confirm_user,
-        ):
-            store.delete_user(active_user.user_id)
-            ui_state.clear_active_context()
-            logger.info("ui_user_deleted user_id=%s", active_user.user_id)
-            st.rerun()
+def _render_alignment_controls(session: SessionState) -> None:
+    st.title("Alignment")
+    score = max(-100, min(100, session.alignment_score))
+    thumb_position = (score + 100) / 2
+    nickname = escape(moral_nickname(score))
+    icon = moral_icon(score)
+    label = escape(alignment_label(score))
+    st.markdown(
+        f"""
+        <div class="ad-alignment-panel">
+          <div class="ad-alignment-top">
+            <div>
+              <div class="ad-alignment-name">{icon} {nickname}</div>
+              <div>{label}</div>
+            </div>
+            <div class="ad-alignment-score">{score:+d}</div>
+          </div>
+          <div class="ad-alignment-track" aria-label="Alignment score">
+            <div class="ad-alignment-thumb" style="left: {thumb_position:.1f}%"></div>
+          </div>
+          <div class="ad-alignment-ends">
+            <span>🔥 Hell</span>
+            <span>⚖️ Mortal</span>
+            <span>👼 Heaven</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _render_score_controls(session: SessionState) -> None:
@@ -150,11 +203,28 @@ def _render_score_controls(session: SessionState) -> None:
         name = "Sunny" if streak_owner == Character.SUNNY else "Crowley"
         st.caption(f"Conversion streak: {name} x{streak}")
 
-    st.divider()
-    st.title("Alignment")
-    normalized = (session.alignment_score + 100) / 200
-    st.progress(normalized)
-    st.metric(alignment_label(session.alignment_score), session.alignment_score)
+
+def _status_class(status: RoundStatus) -> str:
+    return {
+        RoundStatus.ACTIVE: "ad-pill-active",
+        RoundStatus.JUDGED: "ad-pill-judged",
+        RoundStatus.DECIDED: "ad-pill-decided",
+    }[status]
+
+
+def _winner_badge(round_data: Round) -> str:
+    if round_data.verdict is None:
+        return "Awaiting judgment"
+    if round_data.verdict.winner == Character.SUNNY:
+        return "👼 Sunny"
+    return "😈 Crowley"
+
+
+def _prompt_preview(round_data: Round) -> str:
+    preview = " ".join(round_data.dilemma.split())
+    if len(preview) > 96:
+        preview = f"{preview[:93]}..."
+    return preview
 
 
 def _render_history(session: SessionState) -> None:
@@ -164,12 +234,27 @@ def _render_history(session: SessionState) -> None:
         return
     selected_round = ui_state.get_selected_round_number()
     for round_data in reversed(session.rounds[-8:]):
-        label = round_history_label(round_data)
         button_type: Literal["primary", "secondary"] = (
             "primary" if round_data.round_number == selected_round else "secondary"
         )
+        status_label = escape(round_data.status.value.title())
+        prompt = escape(_prompt_preview(round_data))
+        winner = escape(_winner_badge(round_data))
+        st.markdown(
+            f"""
+            <div class="ad-history-card">
+              <div class="ad-history-meta">
+                <span class="ad-history-round">Round {round_data.round_number}</span>
+                <span class="ad-pill {_status_class(round_data.status)}">{status_label}</span>
+              </div>
+              <div class="ad-winner">{winner}</div>
+              <div class="ad-history-prompt">{prompt}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         if st.button(
-            label,
+            f"View round {round_data.round_number}",
             key=f"history_round_{round_data.round_number}",
             type=button_type,
             use_container_width=True,
@@ -177,22 +262,16 @@ def _render_history(session: SessionState) -> None:
             ui_state.set_selected_round_number(round_data.round_number)
             logger.info("ui_history_round_selected round_number=%d", round_data.round_number)
             st.rerun()
-        if round_data.verdict:
-            winner = "Sunny" if round_data.verdict.winner == Character.SUNNY else "Crowley"
-            choice = round_data.user_choice.value if round_data.user_choice else "not chosen"
-            st.caption(f"Judge: {winner} | Choice: {choice}")
-        else:
-            st.caption("No verdict yet")
 
 
 def render_sidebar(active_user: User, session: SessionState, store: SessionStore) -> None:
     with st.sidebar:
         _render_user_controls(active_user, session, store)
         st.divider()
-        _render_session_controls(active_user, session, store)
-        st.divider()
-        _render_delete_controls(active_user, session, store)
+        _render_alignment_controls(session)
         st.divider()
         _render_score_controls(session)
+        st.divider()
+        _render_session_controls(active_user, session, store)
         st.divider()
         _render_history(session)
