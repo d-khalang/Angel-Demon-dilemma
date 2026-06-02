@@ -30,9 +30,9 @@ from angel_demon.ui.debate import (
 )
 
 TARGET_LABELS = {
-    "Ask both": ResponseTarget.BOTH,
-    "Ask Sunny": ResponseTarget.SUNNY,
-    "Ask Crowley": ResponseTarget.CROWLEY,
+    "both": ResponseTarget.BOTH,
+    "Sunny": ResponseTarget.SUNNY,
+    "Crowley": ResponseTarget.CROWLEY,
 }
 
 
@@ -131,24 +131,28 @@ def render_active_round_controls(
 ) -> None:
     action: str | None = None
     prompt: str | None = None
-    selected_target: str | None = "Ask both"
+    selected_target: str | None = "both"
     with st.bottom:
-        selected_target = st.segmented_control(
-            "Reply to",
-            options=list(TARGET_LABELS.keys()),
-            default="Ask both",
-            key=f"reply_target_{round_data.round_number}",
+        target_col, spacer_col, continue_col, finalize_col = st.columns(
+            [1.45, 1.1, 1.05, 0.85],
+            vertical_alignment="bottom",
         )
-        col_a, col_b, col_c = st.columns([1.2, 1, 2])
-        if col_a.button(
+        with target_col:
+            selected_target = st.segmented_control(
+                "Reply to",
+                options=list(TARGET_LABELS.keys()),
+                default="both",
+                key=f"reply_target_{round_data.round_number}",
+            )
+        spacer_col.empty()
+        if continue_col.button(
             primary_action_label(round_data),
             type="primary",
             use_container_width=True,
         ):
             action = "advance"
-        if col_b.button("Finalize", use_container_width=True):
+        if finalize_col.button("Finalize", use_container_width=True):
             action = "judge"
-        col_c.caption("Add context below, or target one side before sending.")
         prompt = st.chat_input("Add context or ask a follow-up")
 
     if action == "advance":
@@ -263,7 +267,7 @@ def _send_followup(
     store: SessionStore,
     llm: Any,
 ) -> None:
-    target = TARGET_LABELS[str(selected_target or "Ask both")]
+    target = TARGET_LABELS[str(selected_target or "both")]
     with st.chat_message("user"):
         st.write(prompt)
     try:
