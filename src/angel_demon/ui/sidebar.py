@@ -8,7 +8,7 @@ from typing import Literal
 import streamlit as st
 
 from angel_demon.logging_config import get_logger
-from angel_demon.models import Character, Round, RoundStatus, SessionState, User
+from angel_demon.models import Character, Round, RoundStatus, SessionState, User, UserChoice
 from angel_demon.scoring import (
     calculate_conversion_streak,
     calculate_judge_laurels,
@@ -16,7 +16,6 @@ from angel_demon.scoring import (
 )
 from angel_demon.state import DEFAULT_USER_NAME, SessionStore
 from angel_demon.ui import session_state as ui_state
-from angel_demon.ui.debate import alignment_label
 from angel_demon.ui.realm_art import moral_icon, moral_nickname
 
 logger = get_logger("ui.sidebar")
@@ -157,7 +156,6 @@ def _render_alignment_controls(session: SessionState) -> None:
     thumb_position = (score + 100) / 2
     nickname = escape(moral_nickname(score))
     icon = moral_icon(score)
-    label = escape(alignment_label(score))
     st.markdown(
         f"""
         <div class="ad-alignment-panel">
@@ -210,12 +208,21 @@ def _status_class(status: RoundStatus) -> str:
     }[status]
 
 
-def _winner_badge(round_data: Round) -> str:
+def _user_choice_badge(round_data: Round) -> str:
+    return {
+        UserChoice.FOLLOW_SUNNY: f"You chose {moral_icon(21)} Sunny",
+        UserChoice.FOLLOW_CROWLEY: f"You chose {moral_icon(-21)} Crowley",
+        UserChoice.UNDECIDED: f"You chose {moral_icon(0)} Undecided",
+        None: "No choice yet",
+    }[round_data.user_choice]
+
+
+def _judge_badge(round_data: Round) -> str:
     if round_data.verdict is None:
-        return "Awaiting judgment"
+        return "Judge pending"
     if round_data.verdict.winner == Character.SUNNY:
-        return f"{moral_icon(21)} Sunny"
-    return f"{moral_icon(-21)} Crowley"
+        return f"Judge: {moral_icon(21)} Sunny"
+    return f"Judge: {moral_icon(-21)} Crowley"
 
 
 def _prompt_preview(round_data: Round) -> str:
@@ -237,7 +244,8 @@ def _render_history(session: SessionState) -> None:
         )
         status_label = escape(round_data.status.value.title())
         prompt = escape(_prompt_preview(round_data))
-        winner = escape(_winner_badge(round_data))
+        user_choice = escape(_user_choice_badge(round_data))
+        judge = escape(_judge_badge(round_data))
         st.markdown(
             f"""
             <div class="ad-history-card">
@@ -245,7 +253,8 @@ def _render_history(session: SessionState) -> None:
                 <span class="ad-history-round">Round {round_data.round_number}</span>
                 <span class="ad-pill {_status_class(round_data.status)}">{status_label}</span>
               </div>
-              <div class="ad-winner">{winner}</div>
+              <div class="ad-user-choice">{user_choice}</div>
+              <div class="ad-judge">{judge}</div>
               <div class="ad-history-prompt">{prompt}</div>
             </div>
             """,
@@ -273,4 +282,3 @@ def render_sidebar(active_user: User, session: SessionState, store: SessionStore
         _render_session_controls(active_user, session, store)
         st.divider()
         _render_history(session)
-
