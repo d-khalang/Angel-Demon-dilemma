@@ -154,3 +154,9 @@ class AgentProfileUpdate(BaseModel):
     failed_tactics: list[str] = Field(default_factory=list)
     opponent_winning_tactics: list[str] = Field(default_factory=list)
     adaptation_notes: str
+
+
+class SessionMemoryUpdate(BaseModel):
+    user_update: UserProfileUpdate
+    sunny_update: AgentProfileUpdate
+    crowley_update: AgentProfileUpdate

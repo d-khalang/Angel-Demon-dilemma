@@ -13,11 +13,16 @@ from angel_demon.models import (
     AgentProfileUpdate,
     Character,
     Round,
+    SessionMemoryUpdate,
     UserChoice,
     UserProfile,
     UserProfileUpdate,
 )
-from angel_demon.prompts import AGENT_MEMORY_INSTRUCTIONS, USER_MEMORY_INSTRUCTIONS
+from angel_demon.prompts import (
+    AGENT_MEMORY_INSTRUCTIONS,
+    SESSION_MEMORY_INSTRUCTIONS,
+    USER_MEMORY_INSTRUCTIONS,
+)
 
 logger = get_logger("memory")
 
@@ -71,6 +76,148 @@ def _memory_round_payload(round_result: Round) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _decision_history(
+    profile: UserProfile,
+    round_result: Round,
+    *,
+    include_round_choice: bool,
+) -> list[UserChoice]:
+    if not include_round_choice:
+        return list(profile.decision_history)
+    return [
+        *profile.decision_history,
+        round_result.user_choice or UserChoice.UNDECIDED,
+    ]
+
+
+def _apply_user_update(
+    profile: UserProfile,
+    round_result: Round,
+    update: UserProfileUpdate,
+    *,
+    include_round_choice: bool,
+) -> UserProfile:
+    return UserProfile(
+        inferred_values=_dedupe(update.inferred_values),
+        decision_history=_decision_history(
+            profile,
+            round_result,
+            include_round_choice=include_round_choice,
+        ),
+        vulnerability_to_sunny=update.vulnerability_to_sunny,
+        vulnerability_to_crowley=update.vulnerability_to_crowley,
+        recent_themes=_dedupe(update.recent_themes, limit=5),
+        notes=update.notes,
+    )
+
+
+def _apply_agent_update(profile: AgentProfile, update: AgentProfileUpdate) -> AgentProfile:
+    return AgentProfile(
+        character=profile.character,
+        successful_tactics=_dedupe(update.successful_tactics),
+        failed_tactics=_dedupe(update.failed_tactics),
+        opponent_winning_tactics=_dedupe(update.opponent_winning_tactics),
+        adaptation_notes=update.adaptation_notes,
+        wins=profile.wins,
+        losses=profile.losses,
+    )
+
+
+def _session_memory_messages(
+    user_profile: UserProfile,
+    sunny_profile: AgentProfile,
+    crowley_profile: AgentProfile,
+    round_result: Round,
+) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": SESSION_MEMORY_INSTRUCTIONS},
+        {
+            "role": "user",
+            "content": (
+                f"Current user profile JSON:\n{user_profile.model_dump_json()}\n\n"
+                f"Current Sunny profile JSON:\n{sunny_profile.model_dump_json()}\n\n"
+                f"Current Crowley profile JSON:\n{crowley_profile.model_dump_json()}\n\n"
+                f"Latest round summary JSON:\n{_memory_round_payload(round_result)}\n\n"
+                "Return updates for user_update, sunny_update, and crowley_update. "
+                "For each character, successful_tactics are tactics that helped that character "
+                "win the user's choice this round, failed_tactics are tactics that did not, and "
+                "opponent_winning_tactics are the opposing tactics to counter next."
+            ),
+        },
+    ]
+
+
+async def update_session_memory(
+    user_profile: UserProfile,
+    sunny_profile: AgentProfile,
+    crowley_profile: AgentProfile,
+    round_result: Round,
+    llm: LLMProvider,
+    *,
+    temperature: float,
+    user_choice_already_recorded: bool = False,
+) -> tuple[UserProfile, AgentProfile, AgentProfile]:
+    if round_result.verdict is None:
+        raise ValueError("Cannot update session memory before a round has a verdict.")
+
+    usage_source: SessionMemoryUpdate | None = None
+    try:
+        update = await llm.complete_json(
+            _session_memory_messages(
+                user_profile,
+                sunny_profile,
+                crowley_profile,
+                round_result,
+            ),
+            SessionMemoryUpdate,
+            temperature=temperature,
+            max_output_tokens=1200,
+        )
+        updated_user = _apply_user_update(
+            user_profile,
+            round_result,
+            update.user_update,
+            include_round_choice=not user_choice_already_recorded,
+        )
+        updated_sunny = _apply_agent_update(sunny_profile, update.sunny_update)
+        updated_crowley = _apply_agent_update(crowley_profile, update.crowley_update)
+        usage_source = update
+    except (LLMError, ValidationError):
+        logger.exception(
+            "session_memory_update_failed_using_heuristic round_number=%d",
+            round_result.round_number,
+        )
+        updated_user = _apply_user_update(
+            user_profile,
+            round_result,
+            _heuristic_user_update(
+                user_profile,
+                round_result,
+                include_round_choice=not user_choice_already_recorded,
+            ),
+            include_round_choice=not user_choice_already_recorded,
+        )
+        updated_sunny = _apply_agent_update(
+            sunny_profile,
+            _heuristic_agent_update(sunny_profile, round_result),
+        )
+        updated_crowley = _apply_agent_update(
+            crowley_profile,
+            _heuristic_agent_update(crowley_profile, round_result),
+        )
+
+    updated_user = attach_usage(updated_user, get_attached_usage(usage_source))
+    logger.info(
+        "session_memory_updated round_number=%d user_values=%d sunny_tactics=%d "
+        "crowley_tactics=%d",
+        round_result.round_number,
+        len(updated_user.inferred_values),
+        len(updated_sunny.successful_tactics),
+        len(updated_crowley.successful_tactics),
+    )
+    return updated_user, updated_sunny, updated_crowley
+
+
 async def update_user_profile(
     profile: UserProfile,
     round_result: Round,
@@ -96,33 +243,23 @@ async def update_user_profile(
             temperature=temperature,
             max_output_tokens=500,
         )
-        updated = UserProfile(
-            inferred_values=_dedupe(update.inferred_values),
-            decision_history=[
-                *profile.decision_history,
-                round_result.user_choice or UserChoice.UNDECIDED,
-            ],
-            vulnerability_to_sunny=update.vulnerability_to_sunny,
-            vulnerability_to_crowley=update.vulnerability_to_crowley,
-            recent_themes=_dedupe(update.recent_themes, limit=5),
-            notes=update.notes,
+        updated = _apply_user_update(
+            profile,
+            round_result,
+            update,
+            include_round_choice=True,
         )
     except (LLMError, ValidationError):
         logger.exception(
             "user_profile_update_failed_using_heuristic round_number=%d",
             round_result.round_number,
         )
-        update = _heuristic_user_update(profile, round_result)
-        updated = UserProfile(
-            inferred_values=_dedupe(update.inferred_values),
-            decision_history=[
-                *profile.decision_history,
-                round_result.user_choice or UserChoice.UNDECIDED,
-            ],
-            vulnerability_to_sunny=update.vulnerability_to_sunny,
-            vulnerability_to_crowley=update.vulnerability_to_crowley,
-            recent_themes=_dedupe(update.recent_themes, limit=5),
-            notes=update.notes,
+        update = _heuristic_user_update(profile, round_result, include_round_choice=True)
+        updated = _apply_user_update(
+            profile,
+            round_result,
+            update,
+            include_round_choice=True,
         )
     updated = attach_usage(updated, get_attached_usage(update))
     logger.info(
@@ -175,23 +312,16 @@ async def update_agent_profile(
             temperature=temperature,
             max_output_tokens=500,
         )
-    except LLMError:
+        updated = _apply_agent_update(profile, update)
+    except (LLMError, ValidationError):
         logger.exception(
             "agent_profile_update_failed_using_heuristic character=%s round_number=%d",
             profile.character.value,
             round_result.round_number,
         )
         update = _heuristic_agent_update(profile, round_result)
+        updated = _apply_agent_update(profile, update)
 
-    updated = AgentProfile(
-        character=profile.character,
-        successful_tactics=_dedupe(update.successful_tactics),
-        failed_tactics=_dedupe(update.failed_tactics),
-        opponent_winning_tactics=_dedupe(update.opponent_winning_tactics),
-        adaptation_notes=update.adaptation_notes,
-        wins=profile.wins,
-        losses=profile.losses,
-    )
     updated = attach_usage(updated, get_attached_usage(update))
     logger.info(
         "agent_profile_updated character=%s round_number=%d successful_tactics=%d "
@@ -204,8 +334,17 @@ async def update_agent_profile(
     return updated
 
 
-def _heuristic_user_update(profile: UserProfile, round_result: Round) -> UserProfileUpdate:
-    choices = [*profile.decision_history, round_result.user_choice or UserChoice.UNDECIDED]
+def _heuristic_user_update(
+    profile: UserProfile,
+    round_result: Round,
+    *,
+    include_round_choice: bool,
+) -> UserProfileUpdate:
+    choices = _decision_history(
+        profile,
+        round_result,
+        include_round_choice=include_round_choice,
+    )
     sunny_count = choices.count(UserChoice.FOLLOW_SUNNY)
     crowley_count = choices.count(UserChoice.FOLLOW_CROWLEY)
     total = max(1, sunny_count + crowley_count)

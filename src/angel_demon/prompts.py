@@ -265,3 +265,11 @@ AGENT_MEMORY_INSTRUCTIONS = """
 You update one character's strategy profile after a debate round. Keep tactical lists short,
 deduplicated, and useful for the next prompt. Return only structured JSON matching the schema.
 """.strip()
+
+
+SESSION_MEMORY_INSTRUCTIONS = """
+You update all compact memory profiles after one moral dilemma debate round.
+Infer user values cautiously from behavior. Do not over-personalize or invent private facts.
+Keep character tactical lists short, deduplicated, and useful for the next prompt.
+Return only structured JSON matching the schema.
+""".strip()
