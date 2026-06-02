@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -20,7 +19,7 @@ from angel_demon.llm import (
     get_attached_usage,
 )
 from angel_demon.logging_config import get_logger
-from angel_demon.memory import update_agent_profile, update_user_profile
+from angel_demon.memory import update_session_memory
 from angel_demon.models import (
     Character,
     ConversationMessage,
@@ -462,27 +461,16 @@ async def update_round_memory(
     settings: Settings,
 ) -> SessionState:
     memory_start = time.perf_counter()
-    session.user_profile, session.sunny_profile, session.crowley_profile = await asyncio.gather(
-        update_user_profile(
+    session.user_profile, session.sunny_profile, session.crowley_profile = (
+        await update_session_memory(
             session.user_profile,
-            current_round,
-            llm,
-            temperature=settings.memory_temperature,
-        ),
-        update_agent_profile(
             session.sunny_profile,
-            current_round,
-            session.user_profile,
-            llm,
-            temperature=settings.memory_temperature,
-        ),
-        update_agent_profile(
             session.crowley_profile,
             current_round,
-            session.user_profile,
             llm,
             temperature=settings.memory_temperature,
-        ),
+            user_choice_already_recorded=True,
+        )
     )
     memory_usage = _combine_usage(
         [
