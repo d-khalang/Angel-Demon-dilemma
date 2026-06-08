@@ -7,14 +7,25 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Literal
 from uuid import uuid4
 
 from angel_demon.logging_config import get_logger
-from angel_demon.models import AgentProfile, Character, Round, SessionState, User, UserProfile
+from angel_demon.models import (
+    AgentProfile,
+    Character,
+    ConversationMessage,
+    ConversationSpeaker,
+    ResponseTarget,
+    Round,
+    SessionState,
+    User,
+    UserProfile,
+)
 
 logger = get_logger("state")
 DEFAULT_USER_NAME = "Anonymous Player"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _now_iso() -> str:
@@ -39,18 +50,20 @@ class SessionStore:
         conn.execute("PRAGMA busy_timeout = 5000")
         if self.db_path.name != ":memory:":
             conn.execute("PRAGMA journal_mode = WAL")
-        conn.autocommit = False
         logger.debug("sqlite_connection_opened db_path=%s", self.db_path)
         return conn
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         conn = self._open_connection()
         try:
+            conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             yield conn
-            conn.commit()
+            if conn.in_transaction:
+                conn.execute("COMMIT")
         except Exception:
-            conn.rollback()
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise
         finally:
             conn.close()
@@ -69,6 +82,9 @@ class SessionStore:
                 self._migrate_legacy_sessions_to_users(conn)
 
             self._create_schema(conn)
+            conn.execute(
+                "UPDATE memory_jobs SET status = 'pending' WHERE status = 'processing'"
+            )
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
@@ -124,11 +140,21 @@ class SessionStore:
                 created_at      TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS memory_jobs (
+                session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                round_number    INTEGER NOT NULL,
+                status          TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                PRIMARY KEY (session_id, round_number)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
             CREATE INDEX IF NOT EXISTS idx_rounds_session ON rounds(session_id);
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
             CREATE INDEX IF NOT EXISTS idx_model_runs_session ON model_runs(session_id);
-            PRAGMA user_version = 3;
+            CREATE INDEX IF NOT EXISTS idx_memory_jobs_status ON memory_jobs(status);
+            PRAGMA user_version = 4;
             """
         )
 
@@ -274,36 +300,7 @@ class SessionStore:
     def save_session(self, session: SessionState) -> None:
         session.updated_at = datetime.now(UTC)
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO sessions (
-                    session_id, alignment, user_profile, sunny_profile, crowley_profile,
-                    created_at, updated_at, user_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_id) DO UPDATE SET
-                    user_id = excluded.user_id,
-                    alignment = excluded.alignment,
-                    user_profile = excluded.user_profile,
-                    sunny_profile = excluded.sunny_profile,
-                    crowley_profile = excluded.crowley_profile,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    session.session_id,
-                    session.alignment_score,
-                    session.user_profile.model_dump_json(),
-                    session.sunny_profile.model_dump_json(),
-                    session.crowley_profile.model_dump_json(),
-                    session.created_at.isoformat(),
-                    session.updated_at.isoformat(),
-                    session.user_id,
-                ),
-            )
-            conn.execute(
-                "UPDATE users SET updated_at = ? WHERE user_id = ?",
-                (session.updated_at.isoformat(), session.user_id),
-            )
+            self._write_session(conn, session)
         logger.info(
             "session_saved session_id=%s user_id=%s alignment=%d rounds=%d",
             session.session_id,
@@ -394,22 +391,7 @@ class SessionStore:
 
     def save_round(self, session_id: str, round_data: Round) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO rounds (session_id, round_number, dilemma, round_data, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, round_number) DO UPDATE SET
-                    dilemma = excluded.dilemma,
-                    round_data = excluded.round_data
-                """,
-                (
-                    session_id,
-                    round_data.round_number,
-                    round_data.dilemma,
-                    round_data.model_dump_json(),
-                    round_data.timestamp.isoformat(),
-                ),
-            )
+            self._write_round(conn, session_id, round_data)
         logger.info(
             "round_saved session_id=%s round_number=%d dilemma_chars=%d",
             session_id,
@@ -425,13 +407,7 @@ class SessionStore:
         content: str,
     ) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO messages (session_id, round_number, role, content, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (session_id, round_number, role, content, _now_iso()),
-            )
+            self._write_message(conn, session_id, round_number, role, content)
         logger.info(
             "message_saved session_id=%s round_number=%d role=%s content_chars=%d",
             session_id,
@@ -454,26 +430,17 @@ class SessionStore:
         error: str | None = None,
     ) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO model_runs (
-                    session_id, round_number, call_type, model, input_tokens, output_tokens,
-                    latency_ms, was_streamed, error, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    round_number,
-                    call_type,
-                    model,
-                    input_tokens,
-                    output_tokens,
-                    latency_ms,
-                    1 if was_streamed else 0,
-                    error,
-                    _now_iso(),
-                ),
+            self._write_model_run(
+                conn,
+                session_id,
+                round_number,
+                call_type,
+                model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=latency_ms,
+                was_streamed=was_streamed,
+                error=error,
             )
         logger.info(
             "model_run_logged session_id=%s round_number=%d call_type=%s model=%s "
@@ -485,6 +452,304 @@ class SessionStore:
             latency_ms,
             was_streamed,
             error,
+        )
+
+    def create_round(self, session: SessionState, dilemma: str) -> Round:
+        """Allocate and persist a round number under a SQLite write lock."""
+        with self._connect(immediate=True) as conn:
+            self._refresh_session(conn, session)
+            row = conn.execute(
+                "SELECT COALESCE(MAX(round_number), 0) + 1 FROM rounds WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            round_number = int(row[0])
+            round_data = Round(
+                round_number=round_number,
+                dilemma=dilemma,
+                conversation=[
+                    ConversationMessage(
+                        speaker=ConversationSpeaker.USER,
+                        content=dilemma,
+                        target=ResponseTarget.BOTH,
+                    )
+                ],
+            )
+            session.rounds.append(round_data)
+            session.rounds.sort(key=lambda item: item.round_number)
+            session.updated_at = datetime.now(UTC)
+            self._write_round(conn, session.session_id, round_data)
+            self._write_message(conn, session.session_id, round_number, "user", dilemma)
+            self._write_session(conn, session)
+        return round_data
+
+    def persist_round_transition(
+        self,
+        session: SessionState,
+        round_data: Round,
+        *,
+        messages: list[tuple[str, str]] | None = None,
+        model_runs: list[dict[str, Any]] | None = None,
+        memory_job: Literal["enqueue", "complete", "cancel"] | None = None,
+    ) -> None:
+        """Persist one workflow transition atomically."""
+        session.updated_at = datetime.now(UTC)
+        with self._connect(immediate=True) as conn:
+            self._write_round(conn, session.session_id, round_data)
+            self._write_session(conn, session)
+            for role, content in messages or []:
+                self._write_message(
+                    conn,
+                    session.session_id,
+                    round_data.round_number,
+                    role,
+                    content,
+                )
+            for run in model_runs or []:
+                self._write_model_run(
+                    conn,
+                    session.session_id,
+                    round_data.round_number,
+                    str(run["call_type"]),
+                    str(run["model"]),
+                    input_tokens=run.get("input_tokens"),
+                    output_tokens=run.get("output_tokens"),
+                    latency_ms=run.get("latency_ms"),
+                    was_streamed=bool(run.get("was_streamed", False)),
+                    error=run.get("error"),
+                )
+            if memory_job == "enqueue":
+                self._write_memory_job(conn, session.session_id, round_data.round_number, "pending")
+            elif memory_job == "complete":
+                self._write_memory_job(
+                    conn,
+                    session.session_id,
+                    round_data.round_number,
+                    "completed",
+                )
+            elif memory_job == "cancel":
+                conn.execute(
+                    "DELETE FROM memory_jobs WHERE session_id = ? AND round_number = ?",
+                    (session.session_id, round_data.round_number),
+                )
+
+    def has_pending_memory_update(self, session_id: str, round_number: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM memory_jobs
+                WHERE session_id = ? AND round_number = ? AND status = 'pending'
+                """,
+                (session_id, round_number),
+            ).fetchone()
+        return row is not None
+
+    def claim_pending_memory_update(self, session_id: str, round_number: int) -> bool:
+        with self._connect(immediate=True) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE memory_jobs
+                SET status = 'processing', updated_at = ?
+                WHERE session_id = ? AND round_number = ? AND status = 'pending'
+                """,
+                (_now_iso(), session_id, round_number),
+            )
+        return cursor.rowcount == 1
+
+    def requeue_memory_update(self, session_id: str, round_number: int) -> None:
+        with self._connect(immediate=True) as conn:
+            conn.execute(
+                """
+                UPDATE memory_jobs
+                SET status = 'pending', updated_at = ?
+                WHERE session_id = ? AND round_number = ? AND status = 'processing'
+                """,
+                (_now_iso(), session_id, round_number),
+            )
+
+    def discard_round(self, session: SessionState, round_number: int) -> None:
+        """Remove a round that failed during initial generation."""
+        session.rounds = [
+            round_data
+            for round_data in session.rounds
+            if round_data.round_number != round_number
+        ]
+        session.updated_at = datetime.now(UTC)
+        with self._connect(immediate=True) as conn:
+            conn.execute(
+                "DELETE FROM memory_jobs WHERE session_id = ? AND round_number = ?",
+                (session.session_id, round_number),
+            )
+            conn.execute(
+                "DELETE FROM model_runs WHERE session_id = ? AND round_number = ?",
+                (session.session_id, round_number),
+            )
+            conn.execute(
+                "DELETE FROM messages WHERE session_id = ? AND round_number = ?",
+                (session.session_id, round_number),
+            )
+            conn.execute(
+                "DELETE FROM rounds WHERE session_id = ? AND round_number = ?",
+                (session.session_id, round_number),
+            )
+            self._write_session(conn, session)
+
+    def _write_session(self, conn: sqlite3.Connection, session: SessionState) -> None:
+        conn.execute(
+            """
+            INSERT INTO sessions (
+                session_id, alignment, user_profile, sunny_profile, crowley_profile,
+                created_at, updated_at, user_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                user_id = excluded.user_id,
+                alignment = excluded.alignment,
+                user_profile = excluded.user_profile,
+                sunny_profile = excluded.sunny_profile,
+                crowley_profile = excluded.crowley_profile,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session.session_id,
+                session.alignment_score,
+                session.user_profile.model_dump_json(),
+                session.sunny_profile.model_dump_json(),
+                session.crowley_profile.model_dump_json(),
+                session.created_at.isoformat(),
+                session.updated_at.isoformat(),
+                session.user_id,
+            ),
+        )
+        conn.execute(
+            "UPDATE users SET updated_at = ? WHERE user_id = ?",
+            (session.updated_at.isoformat(), session.user_id),
+        )
+
+    def _refresh_session(
+        self,
+        conn: sqlite3.Connection,
+        session: SessionState,
+    ) -> None:
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Unknown session_id: {session.session_id}")
+        round_rows = conn.execute(
+            """
+            SELECT round_data FROM rounds
+            WHERE session_id = ?
+            ORDER BY round_number ASC
+            """,
+            (session.session_id,),
+        ).fetchall()
+        session.user_id = row["user_id"]
+        session.rounds = [
+            Round.model_validate_json(round_row["round_data"])
+            for round_row in round_rows
+        ]
+        session.alignment_score = row["alignment"]
+        session.user_profile = UserProfile.model_validate_json(row["user_profile"])
+        session.sunny_profile = AgentProfile.model_validate_json(row["sunny_profile"])
+        session.crowley_profile = AgentProfile.model_validate_json(row["crowley_profile"])
+        session.created_at = datetime.fromisoformat(row["created_at"])
+        session.updated_at = datetime.fromisoformat(row["updated_at"])
+
+    def _write_round(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        round_data: Round,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO rounds (session_id, round_number, dilemma, round_data, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, round_number) DO UPDATE SET
+                dilemma = excluded.dilemma,
+                round_data = excluded.round_data
+            """,
+            (
+                session_id,
+                round_data.round_number,
+                round_data.dilemma,
+                round_data.model_dump_json(),
+                round_data.timestamp.isoformat(),
+            ),
+        )
+
+    def _write_message(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        round_number: int,
+        role: str,
+        content: str,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO messages (session_id, round_number, role, content, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (session_id, round_number, role, content, _now_iso()),
+        )
+
+    def _write_model_run(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        round_number: int,
+        call_type: str,
+        model: str,
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        latency_ms: int | None = None,
+        was_streamed: bool = False,
+        error: str | None = None,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO model_runs (
+                session_id, round_number, call_type, model, input_tokens, output_tokens,
+                latency_ms, was_streamed, error, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                round_number,
+                call_type,
+                model,
+                input_tokens,
+                output_tokens,
+                latency_ms,
+                1 if was_streamed else 0,
+                error,
+                _now_iso(),
+            ),
+        )
+
+    def _write_memory_job(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        round_number: int,
+        status: str,
+    ) -> None:
+        now = _now_iso()
+        conn.execute(
+            """
+            INSERT INTO memory_jobs (
+                session_id, round_number, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, round_number) DO UPDATE SET
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (session_id, round_number, status, now, now),
         )
 
     def list_sessions(self, user_id: str | None = None) -> list[dict[str, object]]:

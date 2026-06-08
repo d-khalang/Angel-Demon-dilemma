@@ -179,7 +179,12 @@ def maybe_update_pending_memory(
     store: SessionStore,
     llm: Any,
 ) -> None:
-    if ui_state.get_pending_memory_round() != round_data.round_number:
+    pending_in_ui = ui_state.get_pending_memory_round() == round_data.round_number
+    pending_in_store = store.has_pending_memory_update(
+        session.session_id,
+        round_data.round_number,
+    )
+    if not pending_in_ui and not pending_in_store:
         return
     if round_data.user_choice is None or round_data.verdict is None:
         ui_state.clear_pending_memory_round()

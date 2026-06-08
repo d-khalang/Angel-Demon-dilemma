@@ -19,7 +19,7 @@ from angel_demon.llm import (
     get_attached_usage,
 )
 from angel_demon.logging_config import get_logger
-from angel_demon.memory import update_session_memory
+from angel_demon.memory import rebuild_session_memory, update_session_memory
 from angel_demon.models import (
     Character,
     ConversationMessage,
@@ -119,12 +119,6 @@ def _characters_for_target(target: ResponseTarget) -> list[Character]:
     return [Character.SUNNY, Character.CROWLEY]
 
 
-def _next_round_number(session: SessionState) -> int:
-    if not session.rounds:
-        return 1
-    return max(round_data.round_number for round_data in session.rounds) + 1
-
-
 def _replace_session_round(session: SessionState, round_data: Round) -> None:
     for index, existing in enumerate(session.rounds):
         if existing.round_number == round_data.round_number:
@@ -189,6 +183,13 @@ def _normalize_session_scores(session: SessionState) -> None:
     ]
 
 
+def _rebuild_session_memory(session: SessionState) -> None:
+    session.user_profile, session.sunny_profile, session.crowley_profile = (
+        rebuild_session_memory(session.rounds)
+    )
+    _normalize_session_scores(session)
+
+
 async def _append_agent_response(
     round_data: Round,
     session: SessionState,
@@ -222,18 +223,20 @@ async def _append_agent_response(
     round_data.conversation.append(message)
     _derive_round_fields(round_data)
     _replace_session_round(session, round_data)
-    store.save_message(session.session_id, round_data.round_number, character.value, text)
-    store.save_round(session.session_id, round_data)
-    store.save_session(session)
-    store.log_model_run(
-        session.session_id,
-        round_data.round_number,
-        f"conversation_{character.value}",
-        llm.model,
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        latency_ms=latency_ms,
-        was_streamed=True,
+    store.persist_round_transition(
+        session,
+        round_data,
+        messages=[(character.value, text)],
+        model_runs=[
+            {
+                "call_type": f"conversation_{character.value}",
+                "model": llm.model,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "latency_ms": latency_ms,
+                "was_streamed": True,
+            }
+        ],
     )
     return message
 
@@ -247,42 +250,35 @@ async def start_conversation_round(
     *,
     on_chunk: ChunkCallback | None = None,
 ) -> Round:
-    round_number = _next_round_number(session)
-    round_data = Round(
-        round_number=round_number,
-        dilemma=dilemma,
-        status=RoundStatus.ACTIVE,
-        conversation=[
-            ConversationMessage(
-                speaker=ConversationSpeaker.USER,
-                content=dilemma,
-                target=ResponseTarget.BOTH,
+    round_data = store.create_round(session, dilemma)
+    try:
+        for character in _characters_for_target(ResponseTarget.BOTH):
+            await _append_agent_response(
+                round_data,
+                session,
+                character,
+                ResponseTarget.BOTH,
+                llm,
+                store,
+                settings,
+                on_chunk,
             )
-        ],
-    )
-    _replace_session_round(session, round_data)
-    store.save_round(session.session_id, round_data)
-    store.save_session(session)
-    store.save_message(session.session_id, round_number, "user", dilemma)
-    for character in _characters_for_target(ResponseTarget.BOTH):
-        await _append_agent_response(
-            round_data,
+        await advance_conversation_round(
             session,
-            character,
-            ResponseTarget.BOTH,
+            round_data,
             llm,
             store,
             settings,
-            on_chunk,
+            on_chunk=on_chunk,
         )
-    await advance_conversation_round(
-        session,
-        round_data,
-        llm,
-        store,
-        settings,
-        on_chunk=on_chunk,
-    )
+    except Exception:
+        store.discard_round(session, round_data.round_number)
+        logger.exception(
+            "round_start_failed_discarded session_id=%s round_number=%d",
+            session.session_id,
+            round_data.round_number,
+        )
+        raise
     return round_data
 
 
@@ -305,9 +301,11 @@ async def continue_conversation_round(
     )
     round_data.conversation.append(user_message)
     _replace_session_round(session, round_data)
-    store.save_message(session.session_id, round_data.round_number, "user", followup)
-    store.save_round(session.session_id, round_data)
-    store.save_session(session)
+    store.persist_round_transition(
+        session,
+        round_data,
+        messages=[("user", followup)],
+    )
     for character in _characters_for_target(target):
         await _append_agent_response(
             round_data,
@@ -343,9 +341,11 @@ async def advance_conversation_round(
     )
     round_data.conversation.append(system_message)
     _replace_session_round(session, round_data)
-    store.save_message(session.session_id, round_data.round_number, "system", prompt)
-    store.save_round(session.session_id, round_data)
-    store.save_session(session)
+    store.persist_round_transition(
+        session,
+        round_data,
+        messages=[("system", prompt)],
+    )
     for character in _characters_for_target(ResponseTarget.BOTH):
         await _append_agent_response(
             round_data,
@@ -376,23 +376,6 @@ async def judge_conversation_round(
         temperature=settings.judge_temperature,
     )
     judge_usage = get_attached_usage(verdict)
-    store.log_model_run(
-        session.session_id,
-        round_data.round_number,
-        "judge_conversation",
-        llm.model,
-        input_tokens=judge_usage.input_tokens,
-        output_tokens=judge_usage.output_tokens or max(1, len(verdict.model_dump_json()) // 4),
-        latency_ms=int((time.perf_counter() - judge_start) * 1000),
-        was_streamed=False,
-        error="fallback" if verdict.is_fallback else None,
-    )
-    store.save_message(
-        session.session_id,
-        round_data.round_number,
-        "judge_verdict",
-        verdict.model_dump_json(),
-    )
     round_data.verdict = verdict
     round_data.status = RoundStatus.JUDGED
     round_data.user_choice = None
@@ -400,8 +383,23 @@ async def judge_conversation_round(
     _derive_round_fields(round_data)
     _replace_session_round(session, round_data)
     _normalize_session_scores(session)
-    store.save_round(session.session_id, round_data)
-    store.save_session(session)
+    store.persist_round_transition(
+        session,
+        round_data,
+        messages=[("judge_verdict", verdict.model_dump_json())],
+        model_runs=[
+            {
+                "call_type": "judge_conversation",
+                "model": llm.model,
+                "input_tokens": judge_usage.input_tokens,
+                "output_tokens": judge_usage.output_tokens
+                or max(1, len(verdict.model_dump_json()) // 4),
+                "latency_ms": int((time.perf_counter() - judge_start) * 1000),
+                "was_streamed": False,
+                "error": "fallback" if verdict.is_fallback else None,
+            }
+        ],
+    )
     return round_data
 
 
@@ -412,9 +410,8 @@ def reopen_round(session: SessionState, round_data: Round, store: SessionStore) 
         round_data.user_choice = None
         round_data.alignment_delta = 0
         _replace_session_round(session, round_data)
-        _normalize_session_scores(session)
-        store.save_round(session.session_id, round_data)
-        store.save_session(session)
+        _rebuild_session_memory(session)
+        store.persist_round_transition(session, round_data, memory_job="cancel")
     return round_data
 
 
@@ -435,14 +432,12 @@ def decide_round(
 
     _normalize_session_scores(session)
     session.updated_at = datetime.now(UTC)
-    store.save_message(
-        session.session_id,
-        current_round.round_number,
-        "user_choice",
-        choice.value,
+    store.persist_round_transition(
+        session,
+        current_round,
+        messages=[("user_choice", choice.value)],
+        memory_job="enqueue",
     )
-    store.save_round(session.session_id, current_round)
-    store.save_session(session)
     logger.info(
         "round_decided session_id=%s round_number=%d choice=%s alignment_after=%d",
         session.session_id,
@@ -460,40 +455,54 @@ async def update_round_memory(
     store: SessionStore,
     settings: Settings,
 ) -> SessionState:
-    memory_start = time.perf_counter()
-    session.user_profile, session.sunny_profile, session.crowley_profile = (
-        await update_session_memory(
-            session.user_profile,
-            session.sunny_profile,
-            session.crowley_profile,
-            current_round,
-            llm,
-            temperature=settings.memory_temperature,
-            user_choice_already_recorded=True,
-        )
-    )
-    memory_usage = _combine_usage(
-        [
-            get_attached_usage(session.user_profile),
-            get_attached_usage(session.sunny_profile),
-            get_attached_usage(session.crowley_profile),
-        ]
-    )
-    store.log_model_run(
+    if not store.claim_pending_memory_update(
         session.session_id,
         current_round.round_number,
-        "memory_updates",
-        llm.model,
-        input_tokens=memory_usage.input_tokens,
-        output_tokens=memory_usage.output_tokens,
-        latency_ms=int((time.perf_counter() - memory_start) * 1000),
-    )
-
-    _replace_session_round(session, current_round)
-    _normalize_session_scores(session)
-    session.updated_at = datetime.now(UTC)
-    store.save_round(session.session_id, current_round)
-    store.save_session(session)
+    ):
+        return session
+    memory_start = time.perf_counter()
+    try:
+        session.user_profile, session.sunny_profile, session.crowley_profile = (
+            await update_session_memory(
+                session.user_profile,
+                session.sunny_profile,
+                session.crowley_profile,
+                current_round,
+                llm,
+                temperature=settings.memory_temperature,
+                user_choice_already_recorded=True,
+            )
+        )
+        memory_usage = _combine_usage(
+            [
+                get_attached_usage(session.user_profile),
+                get_attached_usage(session.sunny_profile),
+                get_attached_usage(session.crowley_profile),
+            ]
+        )
+        _replace_session_round(session, current_round)
+        _normalize_session_scores(session)
+        session.updated_at = datetime.now(UTC)
+        store.persist_round_transition(
+            session,
+            current_round,
+            model_runs=[
+                {
+                    "call_type": "memory_updates",
+                    "model": llm.model,
+                    "input_tokens": memory_usage.input_tokens,
+                    "output_tokens": memory_usage.output_tokens,
+                    "latency_ms": int((time.perf_counter() - memory_start) * 1000),
+                }
+            ],
+            memory_job="complete",
+        )
+    except Exception:
+        store.requeue_memory_update(
+            session.session_id,
+            current_round.round_number,
+        )
+        raise
     logger.info(
         "apply_user_choice_complete session_id=%s round_number=%d sunny_wins=%d "
         "crowley_wins=%d",
@@ -530,16 +539,14 @@ def revote_round(
     current_round.alignment_delta = calculate_alignment_delta(choice, current_round.verdict)
     current_round.status = RoundStatus.DECIDED
     _replace_session_round(session, current_round)
-    _normalize_session_scores(session)
+    _rebuild_session_memory(session)
     session.updated_at = datetime.now(UTC)
-    store.save_message(
-        session.session_id,
-        current_round.round_number,
-        "user_choice",
-        choice.value,
+    store.persist_round_transition(
+        session,
+        current_round,
+        messages=[("user_choice", choice.value)],
+        memory_job="enqueue",
     )
-    store.save_round(session.session_id, current_round)
-    store.save_session(session)
     logger.info(
         "round_revoted session_id=%s round_number=%d choice=%s alignment_after=%d",
         session.session_id,

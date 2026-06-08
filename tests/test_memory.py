@@ -3,7 +3,7 @@ from typing import cast
 import pytest
 from pydantic import BaseModel
 
-from angel_demon.llm import LLMProvider
+from angel_demon.llm import LLMProvider, MockLLMProvider
 from angel_demon.memory import update_session_memory, update_user_profile
 from angel_demon.models import (
     AgentProfile,
@@ -113,3 +113,63 @@ async def test_session_memory_falls_back_without_duplicate_recorded_choice() -> 
     assert updated_user.vulnerability_to_sunny == 1.0
     assert updated_sunny.successful_tactics == ["mercy"]
     assert updated_crowley.failed_tactics == ["status"]
+
+
+@pytest.mark.asyncio
+async def test_session_memory_reconciles_tactics_with_the_durable_user_choice() -> None:
+    round_result = Round(
+        round_number=1,
+        dilemma="Should I take the generous option?",
+        user_choice=UserChoice.FOLLOW_CROWLEY,
+        verdict=Verdict(
+            winner=Character.SUNNY,
+            reason="Sunny won the judge.",
+            sunny_score=8,
+            crowley_score=6,
+            persuasion_tactics_sunny=["mercy"],
+            persuasion_tactics_crowley=["status"],
+            key_moment="The user still chose Crowley.",
+        ),
+    )
+    llm = MockLLMProvider(
+        [
+            """
+            {
+              "user_update": {
+                "inferred_values": ["status"],
+                "vulnerability_to_sunny": 0.2,
+                "vulnerability_to_crowley": 0.8,
+                "recent_themes": ["risk"],
+                "notes": "The user chose Crowley."
+              },
+              "sunny_update": {
+                "successful_tactics": ["mercy"],
+                "failed_tactics": [],
+                "opponent_winning_tactics": [],
+                "adaptation_notes": "Adjust."
+              },
+              "crowley_update": {
+                "successful_tactics": [],
+                "failed_tactics": ["status"],
+                "opponent_winning_tactics": ["mercy"],
+                "adaptation_notes": "Repeat what worked."
+              }
+            }
+            """
+        ]
+    )
+
+    _, sunny, crowley = await update_session_memory(
+        UserProfile(decision_history=[UserChoice.FOLLOW_CROWLEY]),
+        AgentProfile(character=Character.SUNNY),
+        AgentProfile(character=Character.CROWLEY),
+        round_result,
+        llm,
+        temperature=0.3,
+        user_choice_already_recorded=True,
+    )
+
+    assert sunny.successful_tactics == []
+    assert sunny.failed_tactics == ["mercy"]
+    assert crowley.successful_tactics == ["status"]
+    assert crowley.failed_tactics == []

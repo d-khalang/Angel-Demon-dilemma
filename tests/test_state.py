@@ -237,6 +237,23 @@ def test_legacy_sessions_schema_is_migrated_without_dropping_data(tmp_path) -> N
     assert sessions[0]["user_id"] == users[0].user_id
 
 
+def test_version_three_database_adds_durable_memory_jobs(tmp_path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "version-three.db"
+    store = SessionStore(db_path)
+    session = store.create_session()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE memory_jobs")
+        conn.execute("PRAGMA user_version = 3")
+
+    migrated = SessionStore(db_path)
+
+    assert not migrated.has_pending_memory_update(session.session_id, 1)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+
+
 def test_delete_session_cascades_related_rows(tmp_path) -> None:
     store = SessionStore(tmp_path / "state.db")
     session = store.create_session()

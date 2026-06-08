@@ -27,6 +27,22 @@ def fallback_verdict(round_number: int, reason: str | None = None) -> Verdict:
     )
 
 
+def _normalize_winner_scores(verdict: Verdict) -> Verdict:
+    if verdict.winner == Character.SUNNY and verdict.sunny_score <= verdict.crowley_score:
+        if verdict.crowley_score == 10:
+            verdict.sunny_score = 10
+            verdict.crowley_score = 9
+        else:
+            verdict.sunny_score = verdict.crowley_score + 1
+    elif verdict.winner == Character.CROWLEY and verdict.crowley_score <= verdict.sunny_score:
+        if verdict.sunny_score == 10:
+            verdict.crowley_score = 10
+            verdict.sunny_score = 9
+        else:
+            verdict.crowley_score = verdict.sunny_score + 1
+    return verdict
+
+
 async def judge_debate(
     dilemma: str,
     sunny_opening: Opening,
@@ -62,17 +78,20 @@ async def judge_debate(
         logger.exception("judge_debate_failed round_number=%d", round_number)
         return fallback_verdict(round_number)
 
-    if verdict.sunny_score == verdict.crowley_score:
+    if (
+        verdict.sunny_score == verdict.crowley_score
+        or verdict.winner == Character.SUNNY
+        and verdict.sunny_score < verdict.crowley_score
+        or verdict.winner == Character.CROWLEY
+        and verdict.crowley_score < verdict.sunny_score
+    ):
         logger.warning(
             "judge_equal_scores_adjusted round_number=%d winner=%s score=%d",
             round_number,
             verdict.winner.value,
             verdict.sunny_score,
         )
-        if verdict.winner == Character.SUNNY:
-            verdict.sunny_score = min(10, verdict.crowley_score + 1)
-        else:
-            verdict.crowley_score = min(10, verdict.sunny_score + 1)
+        verdict = _normalize_winner_scores(verdict)
     logger.info(
         "judge_debate_success round_number=%d winner=%s sunny_score=%d crowley_score=%d",
         round_number,
@@ -106,17 +125,20 @@ async def judge_conversation(
         logger.exception("judge_conversation_failed round_number=%d", round_number)
         return fallback_verdict(round_number)
 
-    if verdict.sunny_score == verdict.crowley_score:
+    if (
+        verdict.sunny_score == verdict.crowley_score
+        or verdict.winner == Character.SUNNY
+        and verdict.sunny_score < verdict.crowley_score
+        or verdict.winner == Character.CROWLEY
+        and verdict.crowley_score < verdict.sunny_score
+    ):
         logger.warning(
             "judge_conversation_equal_scores_adjusted round_number=%d winner=%s score=%d",
             round_number,
             verdict.winner.value,
             verdict.sunny_score,
         )
-        if verdict.winner == Character.SUNNY:
-            verdict.sunny_score = min(10, verdict.crowley_score + 1)
-        else:
-            verdict.crowley_score = min(10, verdict.sunny_score + 1)
+        verdict = _normalize_winner_scores(verdict)
     logger.info(
         "judge_conversation_success round_number=%d winner=%s sunny_score=%d crowley_score=%d",
         round_number,
