@@ -29,8 +29,10 @@ def test_character_prompts_have_distinct_value_frames() -> None:
     assert "protects conscience" in sunny
     assert "Do not drift into Crowley's frame" in sunny
     assert "appetite, self-preservation, ambition" in crowley
+    assert "Self-interest, desire, greed, and personal gain" in crowley
     assert "maximizes the user" in crowley
     assert "freedom, power, comfort" in crowley
+    assert "Do not use selfish reasoning to endorse Sunny's concrete choice" in crowley
     assert "Do not drift into Sunny's frame" in crowley
 
 
