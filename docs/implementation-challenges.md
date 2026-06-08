@@ -33,6 +33,20 @@ the debate-thread, promotion-race, and UI theming changes.
   That would double-count if a user changed their choice.
 - The safer approach is to recalculate alignment and promotion totals from all persisted
   round choices whenever a round is reopened or revoted.
+- LLM-derived profiles also combine multiple rounds and cannot be reversed field by field.
+  Reopening or revoting now rebuilds a conservative profile from durable decided rounds,
+  then queues a new durable memory update when appropriate.
+
+## Persistence And Restart Safety
+
+- Stale Streamlit tabs can hold the same in-memory session snapshot. Round numbers are now
+  allocated under a SQLite write lock so two clients cannot upsert the same round.
+- A workflow transition writes its round snapshot, session, audit messages, model-run
+  metadata, and memory-job state in one transaction.
+- Pending memory work is stored in `memory_jobs`, not only `st.session_state`, so a browser
+  refresh or process restart can resume it.
+- An interrupted initial stream discards the incomplete round and audit rows, allowing a
+  clean retry with the same round number.
 
 ## Streaming Regression
 
@@ -97,8 +111,9 @@ the debate-thread, promotion-race, and UI theming changes.
   app background state and documents that it can be stale during first load and theme changes.
   Our injected CSS also changes the app background, so using that Python-side value created a
   feedback loop.
-- The durable workaround is a tiny `components.html` bridge that watches Streamlit's own
-  theme menu/body background and writes `data-ad-theme` on the parent document. The CSS now
+- The durable workaround is a tiny iframe bridge that watches Streamlit's own
+  theme menu/body background and writes `data-ad-theme` on the parent document. The bridge
+  now uses `st.iframe` because `components.html` was removed after June 1, 2026. The CSS now
   treats light as the default and only activates dark tokens through that explicit attribute.
 - Streamlit reruns can create multiple component instances, so the bridge must be idempotent:
   it disconnects the previous observer, clears the previous polling interval, and then starts

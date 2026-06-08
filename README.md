@@ -54,6 +54,8 @@ The app is intentionally small but split by responsibility:
 
 Character calls produce streamed plain text only. Structured data is created in separate judge and memory calls. This avoids brittle mixed text/JSON parsing while still demonstrating streaming UX and structured-output reliability.
 
+A full explanation of the reasoning behind each architectural and engineering choice is in [docs/design-decisions.md](docs/design-decisions.md).
+
 ## Engineering Notes
 
 The repo includes reusable project skills under `docs/skills/`:
@@ -70,6 +72,7 @@ SQLite is used for the prototype:
 - `rounds`: full structured round snapshots.
 - `messages`: flat transcript history for replay/debugging.
 - `model_runs`: model, latency, token estimates, streaming flag, and error metadata.
+- `memory_jobs`: durable pending/completed memory work so a rerun or restart does not lose it.
 
 The current user model is deliberately local and unauthenticated, which is appropriate for this Streamlit prototype. It gives the database the same ownership shape a production system would need, while keeping login/session security out of scope. For production, this would move to PostgreSQL with JSONB columns, migrations, real authentication, authorization checks, and retention/deletion controls.
 
@@ -92,7 +95,10 @@ ruff check
 mypy src
 ```
 
-The tests focus on deterministic logic: scoring, SQLite persistence, and judge fallback behavior. The LLM provider is mocked in tests so they do not spend tokens.
+The tests cover deterministic logic plus stateful workflow integration, stale-client
+round allocation, transactional persistence, interrupted streams, OpenAI adapter
+contracts, audit-log reconciliation, and a complete Streamlit user journey. The LLM
+provider is mocked in tests so they do not spend tokens.
 
 ## Logging And Debugging
 
