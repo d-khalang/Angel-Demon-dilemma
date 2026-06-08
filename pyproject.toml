@@ -53,3 +53,6 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "live_eval: opt-in tests that call the configured live LLM provider",
+]
