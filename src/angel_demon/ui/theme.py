@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import streamlit.components.v1 as components
+import streamlit as st
 
 
 def inject_theme_mode() -> None:
-    components.html(
+    st.iframe(
         """
         <script>
         (function() {
@@ -76,6 +76,7 @@ def inject_theme_mode() -> None:
         })();
         </script>
         """,
-        height=0,
-        width=0,
+        height=1,
+        width=1,
+        tab_index=-1,
     )
