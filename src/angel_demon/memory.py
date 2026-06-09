@@ -6,15 +6,22 @@ import json
 
 from pydantic import ValidationError
 
+from angel_demon.domain.memory import (
+    apply_agent_update,
+    apply_user_update,
+    enforce_round_outcome,
+    heuristic_agent_update,
+    heuristic_user_update,
+    rebuild_session_memory,
+    tactics_for,
+)
 from angel_demon.llm import LLMError, LLMProvider, attach_usage, get_attached_usage
 from angel_demon.logging_config import get_logger
 from angel_demon.models import (
     AgentProfile,
     AgentProfileUpdate,
-    Character,
     Round,
     SessionMemoryUpdate,
-    UserChoice,
     UserProfile,
     UserProfileUpdate,
 )
@@ -26,16 +33,12 @@ from angel_demon.prompts import (
 
 logger = get_logger("memory")
 
-
-def _dedupe(values: list[str], limit: int = 8) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        key = value.strip().lower()
-        if key and key not in seen:
-            seen.add(key)
-            result.append(value.strip())
-    return result[:limit]
+__all__ = [
+    "rebuild_session_memory",
+    "update_agent_profile",
+    "update_session_memory",
+    "update_user_profile",
+]
 
 
 def _truncate(value: str, limit: int = 600) -> str:
@@ -74,101 +77,6 @@ def _memory_round_payload(round_result: Round) -> str:
         ],
     }
     return json.dumps(payload, ensure_ascii=False)
-
-
-def _decision_history(
-    profile: UserProfile,
-    round_result: Round,
-    *,
-    include_round_choice: bool,
-) -> list[UserChoice]:
-    if not include_round_choice:
-        return list(profile.decision_history)
-    return [
-        *profile.decision_history,
-        round_result.user_choice or UserChoice.UNDECIDED,
-    ]
-
-
-def _apply_user_update(
-    profile: UserProfile,
-    round_result: Round,
-    update: UserProfileUpdate,
-    *,
-    include_round_choice: bool,
-) -> UserProfile:
-    return UserProfile(
-        inferred_values=_dedupe(update.inferred_values),
-        decision_history=_decision_history(
-            profile,
-            round_result,
-            include_round_choice=include_round_choice,
-        ),
-        vulnerability_to_sunny=update.vulnerability_to_sunny,
-        vulnerability_to_crowley=update.vulnerability_to_crowley,
-        recent_themes=_dedupe(update.recent_themes, limit=5),
-        notes=update.notes,
-    )
-
-
-def _apply_agent_update(profile: AgentProfile, update: AgentProfileUpdate) -> AgentProfile:
-    return AgentProfile(
-        character=profile.character,
-        successful_tactics=_dedupe(update.successful_tactics),
-        failed_tactics=_dedupe(update.failed_tactics),
-        opponent_winning_tactics=_dedupe(update.opponent_winning_tactics),
-        adaptation_notes=update.adaptation_notes,
-        wins=profile.wins,
-        losses=profile.losses,
-    )
-
-
-def _enforce_round_outcome(
-    profile: AgentProfile,
-    round_result: Round,
-    update: AgentProfileUpdate,
-) -> AgentProfileUpdate:
-    if round_result.verdict is None:
-        return update
-    own_tactics = (
-        round_result.verdict.persuasion_tactics_sunny
-        if profile.character == Character.SUNNY
-        else round_result.verdict.persuasion_tactics_crowley
-    )
-    opponent_tactics = (
-        round_result.verdict.persuasion_tactics_crowley
-        if profile.character == Character.SUNNY
-        else round_result.verdict.persuasion_tactics_sunny
-    )
-    won = (
-        round_result.user_choice == UserChoice.FOLLOW_SUNNY
-        if profile.character == Character.SUNNY
-        else round_result.user_choice == UserChoice.FOLLOW_CROWLEY
-    )
-    own_keys = {value.strip().lower() for value in own_tactics}
-    successful = [
-        value
-        for value in update.successful_tactics
-        if value.strip().lower() not in own_keys or won
-    ]
-    failed = [
-        value
-        for value in update.failed_tactics
-        if value.strip().lower() not in own_keys or not won
-    ]
-    if won:
-        successful.extend(own_tactics)
-    else:
-        failed.extend(own_tactics)
-    opponent_winning = list(update.opponent_winning_tactics)
-    if not won:
-        opponent_winning.extend(opponent_tactics)
-    return AgentProfileUpdate(
-        successful_tactics=_dedupe(successful),
-        failed_tactics=_dedupe(failed),
-        opponent_winning_tactics=_dedupe(opponent_winning),
-        adaptation_notes=update.adaptation_notes,
-    )
 
 
 def _session_memory_messages(
@@ -221,19 +129,19 @@ async def update_session_memory(
             temperature=temperature,
             max_output_tokens=1200,
         )
-        updated_user = _apply_user_update(
+        updated_user = apply_user_update(
             user_profile,
             round_result,
             update.user_update,
             include_round_choice=not user_choice_already_recorded,
         )
-        updated_sunny = _apply_agent_update(
+        updated_sunny = apply_agent_update(
             sunny_profile,
-            _enforce_round_outcome(sunny_profile, round_result, update.sunny_update),
+            enforce_round_outcome(sunny_profile, round_result, update.sunny_update),
         )
-        updated_crowley = _apply_agent_update(
+        updated_crowley = apply_agent_update(
             crowley_profile,
-            _enforce_round_outcome(crowley_profile, round_result, update.crowley_update),
+            enforce_round_outcome(crowley_profile, round_result, update.crowley_update),
         )
         usage_source = update
     except (LLMError, ValidationError):
@@ -241,23 +149,23 @@ async def update_session_memory(
             "session_memory_update_failed_using_heuristic round_number=%d",
             round_result.round_number,
         )
-        updated_user = _apply_user_update(
+        updated_user = apply_user_update(
             user_profile,
             round_result,
-            _heuristic_user_update(
+            heuristic_user_update(
                 user_profile,
                 round_result,
                 include_round_choice=not user_choice_already_recorded,
             ),
             include_round_choice=not user_choice_already_recorded,
         )
-        updated_sunny = _apply_agent_update(
+        updated_sunny = apply_agent_update(
             sunny_profile,
-            _heuristic_agent_update(sunny_profile, round_result),
+            heuristic_agent_update(sunny_profile, round_result),
         )
-        updated_crowley = _apply_agent_update(
+        updated_crowley = apply_agent_update(
             crowley_profile,
-            _heuristic_agent_update(crowley_profile, round_result),
+            heuristic_agent_update(crowley_profile, round_result),
         )
 
     updated_user = attach_usage(updated_user, get_attached_usage(usage_source))
@@ -297,7 +205,7 @@ async def update_user_profile(
             temperature=temperature,
             max_output_tokens=500,
         )
-        updated = _apply_user_update(
+        updated = apply_user_update(
             profile,
             round_result,
             update,
@@ -308,8 +216,8 @@ async def update_user_profile(
             "user_profile_update_failed_using_heuristic round_number=%d",
             round_result.round_number,
         )
-        update = _heuristic_user_update(profile, round_result, include_round_choice=True)
-        updated = _apply_user_update(
+        update = heuristic_user_update(profile, round_result, include_round_choice=True)
+        updated = apply_user_update(
             profile,
             round_result,
             update,
@@ -336,16 +244,7 @@ async def update_agent_profile(
     if round_result.verdict is None:
         raise ValueError("Cannot update agent memory before a round has a verdict.")
 
-    own_tactics = (
-        round_result.verdict.persuasion_tactics_sunny
-        if profile.character == Character.SUNNY
-        else round_result.verdict.persuasion_tactics_crowley
-    )
-    opponent_tactics = (
-        round_result.verdict.persuasion_tactics_crowley
-        if profile.character == Character.SUNNY
-        else round_result.verdict.persuasion_tactics_sunny
-    )
+    own_tactics, opponent_tactics = tactics_for(profile, round_result)
     messages = [
         {"role": "system", "content": AGENT_MEMORY_INSTRUCTIONS},
         {
@@ -366,15 +265,15 @@ async def update_agent_profile(
             temperature=temperature,
             max_output_tokens=500,
         )
-        updated = _apply_agent_update(profile, update)
+        updated = apply_agent_update(profile, update)
     except (LLMError, ValidationError):
         logger.exception(
             "agent_profile_update_failed_using_heuristic character=%s round_number=%d",
             profile.character.value,
             round_result.round_number,
         )
-        update = _heuristic_agent_update(profile, round_result)
-        updated = _apply_agent_update(profile, update)
+        update = heuristic_agent_update(profile, round_result)
+        updated = apply_agent_update(profile, update)
 
     updated = attach_usage(updated, get_attached_usage(update))
     logger.info(
@@ -386,110 +285,3 @@ async def update_agent_profile(
         len(updated.failed_tactics),
     )
     return updated
-
-
-def _heuristic_user_update(
-    profile: UserProfile,
-    round_result: Round,
-    *,
-    include_round_choice: bool,
-) -> UserProfileUpdate:
-    choices = _decision_history(
-        profile,
-        round_result,
-        include_round_choice=include_round_choice,
-    )
-    sunny_count = choices.count(UserChoice.FOLLOW_SUNNY)
-    crowley_count = choices.count(UserChoice.FOLLOW_CROWLEY)
-    total = max(1, sunny_count + crowley_count)
-    new_values: list[str] = []
-    if round_result.user_choice == UserChoice.FOLLOW_SUNNY:
-        new_values.append("empathy")
-    elif round_result.user_choice == UserChoice.FOLLOW_CROWLEY:
-        new_values.append("self-preservation")
-    if sunny_count + crowley_count == 0:
-        sunny_vulnerability = 0.5
-        crowley_vulnerability = 0.5
-    else:
-        sunny_vulnerability = sunny_count / total
-        crowley_vulnerability = crowley_count / total
-    return UserProfileUpdate(
-        inferred_values=_dedupe([*profile.inferred_values, *new_values]),
-        vulnerability_to_sunny=sunny_vulnerability,
-        vulnerability_to_crowley=crowley_vulnerability,
-        recent_themes=_dedupe([*profile.recent_themes, "moral tradeoff"], limit=5),
-        notes=f"Fallback memory update after round {round_result.round_number}.",
-    )
-
-
-def _heuristic_agent_update(profile: AgentProfile, round_result: Round) -> AgentProfileUpdate:
-    if round_result.verdict is None:
-        raise ValueError("Cannot update agent memory before a round has a verdict.")
-
-    won = (
-        round_result.user_choice == UserChoice.FOLLOW_SUNNY
-        if profile.character == Character.SUNNY
-        else round_result.user_choice == UserChoice.FOLLOW_CROWLEY
-    )
-    own_tactics = (
-        round_result.verdict.persuasion_tactics_sunny
-        if profile.character == Character.SUNNY
-        else round_result.verdict.persuasion_tactics_crowley
-    )
-    opponent_tactics = (
-        round_result.verdict.persuasion_tactics_crowley
-        if profile.character == Character.SUNNY
-        else round_result.verdict.persuasion_tactics_sunny
-    )
-    return AgentProfileUpdate(
-        successful_tactics=_dedupe(
-            [*profile.successful_tactics, *(own_tactics if won else [])]
-        ),
-        failed_tactics=_dedupe([*profile.failed_tactics, *(own_tactics if not won else [])]),
-        opponent_winning_tactics=_dedupe(
-            [*profile.opponent_winning_tactics, *(opponent_tactics if not won else [])]
-        ),
-        adaptation_notes=(
-            "Repeat the tactics that won this user over."
-            if won
-            else "Adjust by countering the opponent's most persuasive tactics more directly."
-        ),
-    )
-
-
-def rebuild_session_memory(
-    rounds: list[Round],
-) -> tuple[UserProfile, AgentProfile, AgentProfile]:
-    """Rebuild adaptive profiles from durable decided rounds.
-
-    This is used when a decision is changed or invalidated. LLM-derived profile
-    snapshots cannot be reversed safely because they combine multiple rounds.
-    """
-    user_profile = UserProfile()
-    sunny_profile = AgentProfile(character=Character.SUNNY)
-    crowley_profile = AgentProfile(character=Character.CROWLEY)
-    decided_rounds = [
-        round_data
-        for round_data in rounds
-        if round_data.verdict is not None and round_data.user_choice is not None
-    ]
-    for round_data in decided_rounds:
-        user_profile = _apply_user_update(
-            user_profile,
-            round_data,
-            _heuristic_user_update(
-                user_profile,
-                round_data,
-                include_round_choice=True,
-            ),
-            include_round_choice=True,
-        )
-        sunny_profile = _apply_agent_update(
-            sunny_profile,
-            _heuristic_agent_update(sunny_profile, round_data),
-        )
-        crowley_profile = _apply_agent_update(
-            crowley_profile,
-            _heuristic_agent_update(crowley_profile, round_data),
-        )
-    return user_profile, sunny_profile, crowley_profile

@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from angel_demon.config import Settings
 from angel_demon.logging_config import get_logger
 
 logger = get_logger("diagnostics")
+
+openai_sdk: Any
+try:
+    import openai as openai_sdk
+except ImportError:
+    openai_sdk = None
 
 
 @dataclass(frozen=True)
@@ -28,20 +35,18 @@ async def check_openai_key(settings: Settings) -> ApiKeyDiagnostic:
             error_type="missing_api_key",
         )
 
-    try:
-        from openai import APIStatusError, AsyncOpenAI, AuthenticationError
-    except ImportError:
-        logger.exception("openai_key_check_missing_package")
+    if openai_sdk is None:
+        logger.error("openai_key_check_missing_package")
         return ApiKeyDiagnostic(
             ok=False,
             message="The openai package is not installed in this environment.",
             error_type="missing_package",
         )
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = openai_sdk.AsyncOpenAI(api_key=settings.openai_api_key)
     try:
         await client.models.list()
-    except AuthenticationError as exc:
+    except openai_sdk.AuthenticationError as exc:
         logger.warning("openai_key_check_auth_failed status_code=%s", exc.status_code)
         return ApiKeyDiagnostic(
             ok=False,
@@ -52,7 +57,7 @@ async def check_openai_key(settings: Settings) -> ApiKeyDiagnostic:
             status_code=exc.status_code,
             error_type=type(exc).__name__,
         )
-    except APIStatusError as exc:
+    except openai_sdk.APIStatusError as exc:
         logger.warning(
             "openai_key_check_api_status_error status_code=%s error_type=%s",
             exc.status_code,
