@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
 
 import streamlit as st
 
+from angel_demon.config import Settings
 from angel_demon.dilemmas import validate_dilemma
 from angel_demon.flow import (
     decide_round,
@@ -15,9 +15,9 @@ from angel_demon.flow import (
     revote_round,
     update_round_memory,
 )
-from angel_demon.llm import LLMError
+from angel_demon.llm import LLMProvider
 from angel_demon.logging_config import get_logger
-from angel_demon.models import ResponseTarget, Round, UserChoice
+from angel_demon.models import ResponseTarget, Round, SessionState, UserChoice
 from angel_demon.state import SessionStore
 from angel_demon.ui import session_state as ui_state
 from angel_demon.ui.debate import (
@@ -28,6 +28,7 @@ from angel_demon.ui.debate import (
     primary_action_label,
     start_chat_round,
 )
+from angel_demon.ui.llm_actions import run_llm_action
 
 TARGET_LABELS = {
     "both": ResponseTarget.BOTH,
@@ -50,7 +51,12 @@ def selected_round(session_rounds: list[Round]) -> Round | None:
     return session_rounds[-1]
 
 
-def start_round(session: Any, settings: Any, store: SessionStore, llm: Any) -> None:
+def start_round(
+    session: SessionState,
+    settings: Settings,
+    store: SessionStore,
+    llm: LLMProvider,
+) -> None:
     dilemma, submitted = choose_dilemma()
     if not submitted:
         return
@@ -67,19 +73,16 @@ def start_round(session: Any, settings: Any, store: SessionStore, llm: Any) -> N
     )
     with st.chat_message("user"):
         st.write(dilemma)
-    try:
-        round_data = asyncio.run(start_chat_round(session, dilemma, settings, store, llm))
-    except LLMError as exc:
-        logger.exception(
-            "ui_debate_start_failed session_id=%s error=%s",
-            session.session_id,
-            exc,
-        )
-        st.error(
+    round_data = run_llm_action(
+        start_chat_round(session, dilemma, settings, store, llm),
+        log_event="ui_debate_start_failed",
+        session_id=session.session_id,
+        user_message=(
             "The OpenAI request failed before the debate could finish. "
             "Check your API key, model access, and project quota, then try again."
-        )
-        st.caption(str(exc))
+        ),
+    )
+    if round_data is None:
         return
 
     ui_state.set_selected_round_number(round_data.round_number)
@@ -89,7 +92,7 @@ def start_round(session: Any, settings: Any, store: SessionStore, llm: Any) -> N
 
 
 def decision_buttons(
-    session: Any,
+    session: SessionState,
     round_data: Round,
     store: SessionStore,
     *,
@@ -123,11 +126,11 @@ def decision_buttons(
 
 
 def render_active_round_controls(
-    session: Any,
+    session: SessionState,
     round_data: Round,
-    settings: Any,
+    settings: Settings,
     store: SessionStore,
-    llm: Any,
+    llm: LLMProvider,
 ) -> None:
     action: str | None = None
     prompt: str | None = None
@@ -163,7 +166,11 @@ def render_active_round_controls(
         _send_followup(session, round_data, prompt, selected_target, settings, store, llm)
 
 
-def render_reopen_option(session: Any, round_data: Round, store: SessionStore) -> None:
+def render_reopen_option(
+    session: SessionState,
+    round_data: Round,
+    store: SessionStore,
+) -> None:
     with st.expander("More options", expanded=False):
         if st.button("Reopen debate", use_container_width=True):
             reopen_round(session, round_data, store)
@@ -173,11 +180,11 @@ def render_reopen_option(session: Any, round_data: Round, store: SessionStore) -
 
 
 def maybe_update_pending_memory(
-    session: Any,
+    session: SessionState,
     round_data: Round,
-    settings: Any,
+    settings: Settings,
     store: SessionStore,
-    llm: Any,
+    llm: LLMProvider,
 ) -> None:
     pending_in_ui = ui_state.get_pending_memory_round() == round_data.round_number
     pending_in_store = store.has_pending_memory_update(
@@ -192,7 +199,9 @@ def maybe_update_pending_memory(
 
     start = time.perf_counter()
     with st.spinner("Updating agent memory in the background..."):
-        updated = asyncio.run(update_round_memory(session, round_data, llm, store, settings))
+        updated = asyncio.run(
+            update_round_memory(session, round_data, llm, store, settings)
+        )
     ui_state.clear_pending_memory_round()
     ui_state.set_session_id(updated.session_id)
     get_logger("app").info(
@@ -204,25 +213,22 @@ def maybe_update_pending_memory(
 
 
 def _continue_agent_debate(
-    session: Any,
+    session: SessionState,
     round_data: Round,
-    settings: Any,
+    settings: Settings,
     store: SessionStore,
-    llm: Any,
+    llm: LLMProvider,
 ) -> None:
-    try:
-        updated = asyncio.run(advance_chat_round(session, round_data, settings, store, llm))
-    except LLMError as exc:
-        get_logger("app").exception(
-            "ui_conversation_advance_failed session_id=%s error=%s",
-            session.session_id,
-            exc,
-        )
-        st.error(
+    updated = run_llm_action(
+        advance_chat_round(session, round_data, settings, store, llm),
+        log_event="ui_conversation_advance_failed",
+        session_id=session.session_id,
+        user_message=(
             "The OpenAI request failed before the agents could continue. "
             "Check your API key, model access, and project quota, then try again."
-        )
-        st.caption(str(exc))
+        ),
+    )
+    if updated is None:
         return
     ui_state.set_selected_round_number(updated.round_number)
     ui_state.request_scroll_to_bottom()
@@ -230,27 +236,24 @@ def _continue_agent_debate(
 
 
 def _judge_round(
-    session: Any,
+    session: SessionState,
     round_data: Round,
-    settings: Any,
+    settings: Settings,
     store: SessionStore,
-    llm: Any,
+    llm: LLMProvider,
 ) -> None:
     start = time.perf_counter()
     with st.spinner("The judge is reading the full transcript..."):
-        try:
-            updated = asyncio.run(judge_chat_round(session, round_data, settings, store, llm))
-        except LLMError as exc:
-            get_logger("app").exception(
-                "ui_conversation_judge_failed session_id=%s error=%s",
-                session.session_id,
-                exc,
-            )
-            st.error(
+        updated = run_llm_action(
+            judge_chat_round(session, round_data, settings, store, llm),
+            log_event="ui_conversation_judge_failed",
+            session_id=session.session_id,
+            user_message=(
                 "The judge request failed. Check your API key, model access, "
                 "and project quota, then try again."
-            )
-            st.caption(str(exc))
+            ),
+        )
+        if updated is None:
             return
     get_logger("app").info(
         "ui_judge_finished session_id=%s round_number=%d elapsed_ms=%d",
@@ -264,32 +267,35 @@ def _judge_round(
 
 
 def _send_followup(
-    session: Any,
+    session: SessionState,
     round_data: Round,
     prompt: str,
     selected_target: str | None,
-    settings: Any,
+    settings: Settings,
     store: SessionStore,
-    llm: Any,
+    llm: LLMProvider,
 ) -> None:
     target = TARGET_LABELS[str(selected_target or "both")]
     with st.chat_message("user"):
         st.write(prompt)
-    try:
-        updated = asyncio.run(
-            continue_chat_round(session, round_data, prompt, target, settings, store, llm)
-        )
-    except LLMError as exc:
-        get_logger("app").exception(
-            "ui_conversation_followup_failed session_id=%s error=%s",
-            session.session_id,
-            exc,
-        )
-        st.error(
+    updated = run_llm_action(
+        continue_chat_round(
+            session,
+            round_data,
+            prompt,
+            target,
+            settings,
+            store,
+            llm,
+        ),
+        log_event="ui_conversation_followup_failed",
+        session_id=session.session_id,
+        user_message=(
             "The OpenAI request failed before the agents could respond. "
             "Check your API key, model access, and project quota, then try again."
-        )
-        st.caption(str(exc))
+        ),
+    )
+    if updated is None:
         return
     ui_state.set_selected_round_number(updated.round_number)
     ui_state.request_scroll_to_bottom()
