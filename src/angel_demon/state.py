@@ -22,10 +22,27 @@ from angel_demon.models import (
     User,
     UserProfile,
 )
+from angel_demon.persistence.records import (
+    refresh_session_from_rows,
+    session_from_rows,
+    user_from_row,
+)
+from angel_demon.persistence.schema import (
+    DEFAULT_USER_NAME,
+    initialize_schema,
+)
+from angel_demon.persistence.schema import (
+    SCHEMA_VERSION as SCHEMA_VERSION,
+)
+from angel_demon.persistence.writes import (
+    write_memory_job,
+    write_message,
+    write_model_run,
+    write_round,
+    write_session,
+)
 
 logger = get_logger("state")
-DEFAULT_USER_NAME = "Anonymous Player"
-SCHEMA_VERSION = 4
 
 
 def _now_iso() -> str:
@@ -71,137 +88,7 @@ class SessionStore:
 
     def _init_db(self) -> None:
         with self._connect() as conn:
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version > SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"Database schema version {version} is newer than supported "
-                    f"version {SCHEMA_VERSION}."
-                )
-
-            if version < 2 and self._has_legacy_sessions_table(conn):
-                self._migrate_legacy_sessions_to_users(conn)
-
-            self._create_schema(conn)
-            conn.execute(
-                "UPDATE memory_jobs SET status = 'pending' WHERE status = 'processing'"
-            )
-
-    def _create_schema(self, conn: sqlite3.Connection) -> None:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id      TEXT PRIMARY KEY,
-                display_name TEXT NOT NULL,
-                created_at   TEXT NOT NULL,
-                updated_at   TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id      TEXT PRIMARY KEY,
-                user_id         TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                alignment       INTEGER NOT NULL DEFAULT 0,
-                user_profile    TEXT NOT NULL,
-                sunny_profile   TEXT NOT NULL,
-                crowley_profile TEXT NOT NULL,
-                created_at      TEXT NOT NULL,
-                updated_at      TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS rounds (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-                round_number    INTEGER NOT NULL,
-                dilemma         TEXT NOT NULL,
-                round_data      TEXT NOT NULL,
-                created_at      TEXT NOT NULL,
-                UNIQUE(session_id, round_number)
-            );
-
-            CREATE TABLE IF NOT EXISTS messages (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-                round_number    INTEGER NOT NULL,
-                role            TEXT NOT NULL,
-                content         TEXT NOT NULL,
-                created_at      TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS model_runs (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-                round_number    INTEGER NOT NULL,
-                call_type       TEXT NOT NULL,
-                model           TEXT NOT NULL,
-                input_tokens    INTEGER,
-                output_tokens   INTEGER,
-                latency_ms      INTEGER,
-                was_streamed    INTEGER NOT NULL DEFAULT 0,
-                error           TEXT,
-                created_at      TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS memory_jobs (
-                session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-                round_number    INTEGER NOT NULL,
-                status          TEXT NOT NULL,
-                created_at      TEXT NOT NULL,
-                updated_at      TEXT NOT NULL,
-                PRIMARY KEY (session_id, round_number)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-            CREATE INDEX IF NOT EXISTS idx_rounds_session ON rounds(session_id);
-            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-            CREATE INDEX IF NOT EXISTS idx_model_runs_session ON model_runs(session_id);
-            CREATE INDEX IF NOT EXISTS idx_memory_jobs_status ON memory_jobs(status);
-            PRAGMA user_version = 4;
-            """
-        )
-
-    def _migrate_legacy_sessions_to_users(self, conn: sqlite3.Connection) -> None:
-        now = _now_iso()
-        default_user_id = str(uuid4())
-        logger.warning(
-            "migrating_legacy_sqlite_schema db_path=%s target_version=%s",
-            self.db_path,
-            SCHEMA_VERSION,
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id      TEXT PRIMARY KEY,
-                display_name TEXT NOT NULL,
-                created_at   TEXT NOT NULL,
-                updated_at   TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO users (user_id, display_name, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (default_user_id, DEFAULT_USER_NAME, now, now),
-        )
-        conn.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
-        conn.execute(
-            "UPDATE sessions SET user_id = ? WHERE user_id IS NULL",
-            (default_user_id,),
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
-        conn.execute("PRAGMA user_version = 2")
-
-    def _has_legacy_sessions_table(self, conn: sqlite3.Connection) -> bool:
-        table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"
-        ).fetchone()
-        if table is None:
-            return False
-        columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
-        }
-        return "user_id" not in columns
+            initialize_schema(conn, self.db_path)
 
     def create_user(self, display_name: str) -> User:
         now = datetime.now(UTC)
@@ -239,12 +126,7 @@ class SessionStore:
                 (DEFAULT_USER_NAME,),
             ).fetchone()
         if row is not None:
-            return User(
-                user_id=row["user_id"],
-                display_name=row["display_name"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-                updated_at=datetime.fromisoformat(row["updated_at"]),
-            )
+            return user_from_row(row)
         return self.create_user(DEFAULT_USER_NAME)
 
     def load_user(self, user_id: str) -> User | None:
@@ -256,27 +138,14 @@ class SessionStore:
         if row is None:
             logger.info("user_load_miss user_id=%s", user_id)
             return None
-        return User(
-            user_id=row["user_id"],
-            display_name=row["display_name"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
+        return user_from_row(row)
 
     def list_users(self) -> list[User]:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM users ORDER BY updated_at DESC, created_at DESC"
             ).fetchall()
-        return [
-            User(
-                user_id=row["user_id"],
-                display_name=row["display_name"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-                updated_at=datetime.fromisoformat(row["updated_at"]),
-            )
-            for row in rows
-        ]
+        return [user_from_row(row) for row in rows]
 
     def create_session(self, user_id: str | None = None) -> SessionState:
         if user_id is None:
@@ -369,17 +238,7 @@ class SessionStore:
                 (session_id,),
             ).fetchall()
 
-        session = SessionState(
-            session_id=row["session_id"],
-            user_id=row["user_id"],
-            rounds=[Round.model_validate_json(r["round_data"]) for r in round_rows],
-            alignment_score=row["alignment"],
-            user_profile=UserProfile.model_validate_json(row["user_profile"]),
-            sunny_profile=AgentProfile.model_validate_json(row["sunny_profile"]),
-            crowley_profile=AgentProfile.model_validate_json(row["crowley_profile"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
+        session = session_from_rows(row, round_rows)
         logger.info(
             "session_loaded session_id=%s user_id=%s alignment=%d rounds=%d",
             session.session_id,
@@ -594,36 +453,7 @@ class SessionStore:
             self._write_session(conn, session)
 
     def _write_session(self, conn: sqlite3.Connection, session: SessionState) -> None:
-        conn.execute(
-            """
-            INSERT INTO sessions (
-                session_id, alignment, user_profile, sunny_profile, crowley_profile,
-                created_at, updated_at, user_id
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id) DO UPDATE SET
-                user_id = excluded.user_id,
-                alignment = excluded.alignment,
-                user_profile = excluded.user_profile,
-                sunny_profile = excluded.sunny_profile,
-                crowley_profile = excluded.crowley_profile,
-                updated_at = excluded.updated_at
-            """,
-            (
-                session.session_id,
-                session.alignment_score,
-                session.user_profile.model_dump_json(),
-                session.sunny_profile.model_dump_json(),
-                session.crowley_profile.model_dump_json(),
-                session.created_at.isoformat(),
-                session.updated_at.isoformat(),
-                session.user_id,
-            ),
-        )
-        conn.execute(
-            "UPDATE users SET updated_at = ? WHERE user_id = ?",
-            (session.updated_at.isoformat(), session.user_id),
-        )
+        write_session(conn, session)
 
     def _refresh_session(
         self,
@@ -644,17 +474,7 @@ class SessionStore:
             """,
             (session.session_id,),
         ).fetchall()
-        session.user_id = row["user_id"]
-        session.rounds = [
-            Round.model_validate_json(round_row["round_data"])
-            for round_row in round_rows
-        ]
-        session.alignment_score = row["alignment"]
-        session.user_profile = UserProfile.model_validate_json(row["user_profile"])
-        session.sunny_profile = AgentProfile.model_validate_json(row["sunny_profile"])
-        session.crowley_profile = AgentProfile.model_validate_json(row["crowley_profile"])
-        session.created_at = datetime.fromisoformat(row["created_at"])
-        session.updated_at = datetime.fromisoformat(row["updated_at"])
+        refresh_session_from_rows(session, row, round_rows)
 
     def _write_round(
         self,
@@ -662,22 +482,7 @@ class SessionStore:
         session_id: str,
         round_data: Round,
     ) -> None:
-        conn.execute(
-            """
-            INSERT INTO rounds (session_id, round_number, dilemma, round_data, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, round_number) DO UPDATE SET
-                dilemma = excluded.dilemma,
-                round_data = excluded.round_data
-            """,
-            (
-                session_id,
-                round_data.round_number,
-                round_data.dilemma,
-                round_data.model_dump_json(),
-                round_data.timestamp.isoformat(),
-            ),
-        )
+        write_round(conn, session_id, round_data)
 
     def _write_message(
         self,
@@ -687,13 +492,7 @@ class SessionStore:
         role: str,
         content: str,
     ) -> None:
-        conn.execute(
-            """
-            INSERT INTO messages (session_id, round_number, role, content, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (session_id, round_number, role, content, _now_iso()),
-        )
+        write_message(conn, session_id, round_number, role, content)
 
     def _write_model_run(
         self,
@@ -709,26 +508,17 @@ class SessionStore:
         was_streamed: bool = False,
         error: str | None = None,
     ) -> None:
-        conn.execute(
-            """
-            INSERT INTO model_runs (
-                session_id, round_number, call_type, model, input_tokens, output_tokens,
-                latency_ms, was_streamed, error, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                session_id,
-                round_number,
-                call_type,
-                model,
-                input_tokens,
-                output_tokens,
-                latency_ms,
-                1 if was_streamed else 0,
-                error,
-                _now_iso(),
-            ),
+        write_model_run(
+            conn,
+            session_id,
+            round_number,
+            call_type,
+            model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            was_streamed=was_streamed,
+            error=error,
         )
 
     def _write_memory_job(
@@ -738,19 +528,7 @@ class SessionStore:
         round_number: int,
         status: str,
     ) -> None:
-        now = _now_iso()
-        conn.execute(
-            """
-            INSERT INTO memory_jobs (
-                session_id, round_number, status, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, round_number) DO UPDATE SET
-                status = excluded.status,
-                updated_at = excluded.updated_at
-            """,
-            (session_id, round_number, status, now, now),
-        )
+        write_memory_job(conn, session_id, round_number, status)
 
     def list_sessions(self, user_id: str | None = None) -> list[dict[str, object]]:
         with self._connect() as conn:
