@@ -1,6 +1,6 @@
 # Angel vs Demon
 
-Angel vs Demon is a moral dilemma debate app built for the Luxia AI Engineer assignment. The user submits a dilemma, then Sunny the angel and Crowley the demon compete to persuade them. Each round has streamed character arguments, a structured judge verdict, an alignment score, and a promotion race.
+Angel vs Demon is a moral dilemma debate app. The user submits a dilemma, then Sunny the angel and Crowley the demon compete to persuade them. Each round has streamed character arguments, a structured judge verdict, an alignment score, and a promotion race.
 
 ## Features
 
@@ -29,7 +29,7 @@ cp .env.example .env
 Then set:
 
 ```env
-OPENAI_API_KEY=your_assignment_key
+OPENAI_API_KEY=your_key
 OPENAI_MODEL=gpt-5.4
 ```
 
@@ -41,18 +41,27 @@ streamlit run app.py
 
 ## Architecture
 
-The app is intentionally small but split by responsibility:
+The app is split into clear layers while keeping stable top-level entry points:
 
-- `app.py`: Streamlit UI and user interactions.
-- `src/angel_demon/llm.py`: OpenAI Responses API provider with streaming and structured JSON helpers.
-- `src/angel_demon/agents.py`: Sunny and Crowley prompt construction and streamed generation.
-- `src/angel_demon/judge.py`: Structured debate verdict and fallback scoring.
-- `src/angel_demon/memory.py`: User and agent adaptation profiles.
+- `app.py`: Streamlit application setup and dependency wiring.
+- `src/angel_demon/ui/`: Streamlit rendering, session context, and user actions.
+- `src/angel_demon/flow.py`: Round lifecycle and workflow orchestration.
+- `src/angel_demon/domain/`: Pure round-state and deterministic memory rules.
+- `src/angel_demon/agents.py`: Sunny and Crowley prompt construction.
+- `src/angel_demon/judge.py`: Structured verdict generation and fallback scoring.
+- `src/angel_demon/memory.py`: LLM-backed adaptive memory orchestration.
+- `src/angel_demon/llm/`: Provider contracts, OpenAI adapter, deterministic mock, and streaming utilities.
+- `src/angel_demon/state.py`: Transaction ownership and the public SQLite store API.
+- `src/angel_demon/persistence/`: SQLite schema, record conversion, and write helpers.
+- `src/angel_demon/models.py`: Validated domain and structured-output models.
 - `src/angel_demon/scoring.py`: Alignment and promotion scoring.
-- `src/angel_demon/state.py`: SQLite persistence.
-- `src/angel_demon/flow.py`: Round orchestration.
 
 Character calls produce streamed plain text only. Structured data is created in separate judge and memory calls. This avoids brittle mixed text/JSON parsing while still demonstrating streaming UX and structured-output reliability.
+
+The package boundaries keep UI, external providers, persistence, and pure domain
+rules independently reviewable. Existing imports such as
+`from angel_demon.llm import OpenAIProvider` remain stable through the package
+facade.
 
 A full explanation of the reasoning behind each architectural and engineering choice is in [docs/design-decisions.md](docs/design-decisions.md).
 
@@ -90,15 +99,23 @@ The promotion race counts user decisions, not just judge verdicts.
 ## Testing
 
 ```bash
-pytest
-ruff check
-mypy src
+pytest -q
+ruff check app.py src tests scripts
+mypy src app.py
 ```
 
 The tests cover deterministic logic plus stateful workflow integration, stale-client
 round allocation, transactional persistence, interrupted streams, OpenAI adapter
 contracts, audit-log reconciliation, and a complete Streamlit user journey. The LLM
-provider is mocked in tests so they do not spend tokens.
+provider is mocked in the default test suite, so normal CI does not spend tokens.
+
+Three live AI evaluations are available as an explicit, token-spending smoke test:
+
+```bash
+RUN_LIVE_EVALS=1 pytest -q tests/evals
+```
+
+They require a configured OpenAI API key and are skipped by default.
 
 ## Logging And Debugging
 
@@ -125,7 +142,7 @@ The SQLite database also records transcripts and model-run metadata in `messages
 To take this beyond a prototype:
 
 - Replace Streamlit with a React/Next.js frontend and FastAPI backend.
-- Use WebSockets or server-sent events for debate streaming.
+- Use resumable server-sent events for debate streaming.
 - Store users, sessions, profiles, and traces in PostgreSQL with migrations.
 - Add authentication, authorization, rate limits, cost ceilings, and per-user deletion.
 - Add OpenTelemetry traces and dashboard metrics for latency, cost, and failures.
