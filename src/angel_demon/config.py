@@ -24,12 +24,17 @@ class Settings:
     memory_temperature: float
 
 
+def normalize_llm_provider(value: str) -> str:
+    """Normalize provider values supplied by shells or environment files."""
+    return value.strip().strip("\"'").lower()
+
+
 def load_settings() -> Settings:
     load_dotenv()
     return Settings(
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5.4"),
-        llm_provider=os.getenv("LLM_PROVIDER", "openai"),
+        llm_provider=normalize_llm_provider(os.getenv("LLM_PROVIDER", "openai")),
         db_path=Path(os.getenv("DB_PATH", "data/state.db")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         log_file=Path(os.getenv("LOG_FILE", "logs/angel_demon.log")),

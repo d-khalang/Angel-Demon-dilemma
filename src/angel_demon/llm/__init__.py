@@ -5,7 +5,7 @@ from __future__ import annotations
 # Kept public for compatibility with tests that replace asyncio.sleep during retries.
 import asyncio as asyncio
 
-from angel_demon.config import Settings
+from angel_demon.config import Settings, normalize_llm_provider
 from angel_demon.llm.core import (
     LLMConfigurationError,
     LLMError,
@@ -49,12 +49,13 @@ __all__ = [
 
 
 def create_llm_provider(settings: Settings) -> LLMProvider:
-    if settings.llm_provider == "openai":
+    provider_name = normalize_llm_provider(settings.llm_provider)
+    if provider_name == "openai":
         return OpenAIProvider(
             settings.openai_api_key,
             settings.openai_model,
             log_payloads=settings.log_llm_payloads,
         )
-    if settings.llm_provider == "mock":
+    if provider_name == "mock":
         return MockLLMProvider()
-    raise ValueError(f"Unknown provider: {settings.llm_provider}")
+    raise ValueError(f"Unknown provider: {provider_name!r}")
