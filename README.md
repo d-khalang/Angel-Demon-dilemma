@@ -11,33 +11,48 @@ Angel vs Demon is a moral dilemma debate app. The user submits a dilemma, then S
 - Agent memory adapts future arguments based on what worked.
 - Local user profiles keep sessions, rounds, messages, and model-run metadata separated.
 
-## Setup
+## Run Locally
 
-Requires Python 3.12+.
+Requirements:
 
-```bash
-uv venv
-uv pip install -e ".[dev]"
+- Python 3.12+
+- An OpenAI API key for live AI responses
+
+### Windows PowerShell
+
+Run these commands from the repository root:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+Copy-Item .env.example .env
 ```
 
-Create a local `.env` file:
+Open `.env` and replace `sk-your-key-here` with your OpenAI API key. The other
+values can remain unchanged.
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+### macOS or Linux
 
 ```bash
+python3.12 -m venv .venv
+./.venv/bin/python -m pip install -e .
 cp .env.example .env
 ```
 
-Then set:
-
-```env
-OPENAI_API_KEY=your_key
-OPENAI_MODEL=gpt-5.4
-```
-
-Run the app:
+Set `OPENAI_API_KEY` in `.env`, then run:
 
 ```bash
-streamlit run app.py
+./.venv/bin/python -m streamlit run app.py
 ```
+
+Streamlit prints the local URL, normally `http://localhost:8501`. The database
+and log directories are created automatically.
+
+To explore the UI without API calls, set `LLM_PROVIDER=mock` in `.env`.
 
 ## Architecture
 
@@ -98,10 +113,18 @@ The promotion race counts user decisions, not just judge verdicts.
 
 ## Testing
 
-```bash
-pytest -q
-ruff check app.py src tests scripts
-mypy src app.py
+Install the development dependencies first:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+```
+
+Then run:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff check app.py src tests scripts
+.\.venv\Scripts\python.exe -m mypy src app.py
 ```
 
 The tests cover deterministic logic plus stateful workflow integration, stale-client
@@ -111,8 +134,9 @@ provider is mocked in the default test suite, so normal CI does not spend tokens
 
 Three live AI evaluations are available as an explicit, token-spending smoke test:
 
-```bash
-RUN_LIVE_EVALS=1 pytest -q tests/evals
+```powershell
+$env:RUN_LIVE_EVALS=1
+.\.venv\Scripts\python.exe -m pytest -q tests/evals
 ```
 
 They require a configured OpenAI API key and are skipped by default.
@@ -131,8 +155,8 @@ Use `LOG_LEVEL=DEBUG` for more detailed connection and request tracing. Set `LOG
 
 Useful checks:
 
-```bash
-python scripts/check_openai_key.py
+```powershell
+.\.venv\Scripts\python.exe scripts/check_openai_key.py
 ```
 
 The SQLite database also records transcripts and model-run metadata in `messages` and `model_runs`, so you can inspect both the application log and durable round history.
